@@ -137,7 +137,7 @@ suite('PostgreSQL', () => {
   const column = (page: LoadedPage, name: string) => page.columns.findIndex((c) => c.name === name);
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension<TestApi>('datakit.datakit')!.activate())!;
+    api = (await vscode.extensions.getExtension<TestApi>('bakiun.datakit')!.activate())!;
     dataSourceId = (await api.store.save(null, pgSettings(), { password: 'app-secret' })).id;
     products.dataSourceId = dataSourceId;
     notes.dataSourceId = dataSourceId;

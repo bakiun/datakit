@@ -2,8 +2,8 @@
   "name": "datakit",
   "displayName": "Datakit",
   "description": "Connect to MySQL, MariaDB, PostgreSQL, MongoDB, Redis and Kafka from VS Code: manage data sources, browse and edit their data.",
-  "version": "0.0.1",
-  "publisher": "datakit",
+  "version": "1.0.0",
+  "publisher": "bakiun",
   "license": "UNLICENSED",
   "private": true,
   "repository": {

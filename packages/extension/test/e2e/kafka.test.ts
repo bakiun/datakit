@@ -83,7 +83,7 @@ suite('Kafka workspace', () => {
   });
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension<TestApi>('datakit.datakit')!.activate())!;
+    api = (await vscode.extensions.getExtension<TestApi>('bakiun.datakit')!.activate())!;
     id = (await api.store.save(null, kafkaSettings(), {})).id;
   });
 

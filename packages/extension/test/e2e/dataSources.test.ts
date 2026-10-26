@@ -49,7 +49,7 @@ suite('Data sources', () => {
   }
 
   suiteSetup(async () => {
-    const extension = vscode.extensions.getExtension<TestApi>('datakit.datakit');
+    const extension = vscode.extensions.getExtension<TestApi>('bakiun.datakit');
     assert.ok(extension);
     api = await extension.activate();
     assert.ok(api, 'the extension returns its test API in test mode');

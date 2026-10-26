@@ -92,7 +92,7 @@ suite('Table data view', () => {
   }
 
   suiteSetup(async () => {
-    const extension = vscode.extensions.getExtension<TestApi>('datakit.datakit');
+    const extension = vscode.extensions.getExtension<TestApi>('bakiun.datakit');
     api = (await extension!.activate())!;
     const settings = { ...createDataSourceSettings('mysql'), name: 'shop-data', host: '127.0.0.1', port: '33306', user: 'app', database: 'shop' };
     const dataSource = await api.store.save(null, settings, { password: 'app-secret' });

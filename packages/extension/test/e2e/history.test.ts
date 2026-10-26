@@ -62,7 +62,7 @@ suite('Query history', () => {
   }
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension<TestApi>('datakit.datakit')!.activate())!;
+    api = (await vscode.extensions.getExtension<TestApi>('bakiun.datakit')!.activate())!;
     const settings = { ...createDataSourceSettings('mysql'), name: 'shop-history', host: '127.0.0.1', port: '33306', user: 'app', database: 'shop' };
     dataSourceId = (await api.store.save(null, settings, { password: 'app-secret' })).id;
     await api.history.clear();

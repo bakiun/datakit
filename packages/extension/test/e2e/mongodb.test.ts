@@ -71,7 +71,7 @@ suite('MongoDB collections', () => {
   const query = (patch: Partial<MongoFindQuery> = {}): MongoFindQuery => ({ filter: '', projection: '', sort: '', collation: '', skip: 0, limit: 20, ...patch });
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension<TestApi>('datakit.datakit')!.activate())!;
+    api = (await vscode.extensions.getExtension<TestApi>('bakiun.datakit')!.activate())!;
     id = (await api.store.save(null, mongoSettings(), { password: 'datakit' })).id;
     ref = { dataSourceId: id, database: DATABASE, collection: COLLECTION };
     const session = await api.sessions.connectMongo(id);

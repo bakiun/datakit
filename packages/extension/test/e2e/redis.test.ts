@@ -51,7 +51,7 @@ suite('Redis key browser', () => {
   }
 
   suiteSetup(async () => {
-    api = (await vscode.extensions.getExtension<TestApi>('datakit.datakit')!.activate())!;
+    api = (await vscode.extensions.getExtension<TestApi>('bakiun.datakit')!.activate())!;
     id = (await api.store.save(null, redisSettings(), { password: 'datakit' })).id;
     const session = await api.sessions.connectRedis(id);
     for (const command of [
