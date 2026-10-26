@@ -4,12 +4,17 @@
   "description": "Connect to MySQL, MariaDB, PostgreSQL, MongoDB, Redis and Kafka from VS Code: manage data sources, browse and edit their data.",
   "version": "1.0.0",
   "publisher": "bakiun",
-  "license": "UNLICENSED",
+  "license": "GPL-3.0-only",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/bakiun/datakit.git"
+    "url": "https://github.com/bakiun/datakit.git",
+    "directory": "packages/extension"
   },
+  "bugs": {
+    "url": "https://github.com/bakiun/datakit/issues"
+  },
+  "homepage": "https://github.com/bakiun/datakit#readme",
   "engines": {
     "vscode": "^1.105.0"
   },

@@ -42,6 +42,8 @@ Project standards are in [CLAUDE.md](CLAUDE.md).
 Requires Node.js 24 LTS (24.22.1 or later; `nvm use` reads `.nvmrc`), pnpm and Docker.
 
 ```sh
+git clone https://github.com/bakiun/datakit.git
+cd datakit
 pnpm install
 pnpm build          # webview UI + extension bundle
 pnpm typecheck
@@ -78,3 +80,7 @@ pnpm package        # packages/extension/datakit-<version>.vsix
 | `packages/adapters/kafka`  | Kafka adapter (@platformatic/kafka) and REST clients for Schema Registry, Kafka Connect, ksqlDB. |
 | `packages/extension`       | Activation, Data Sources tree and filter, commands, connection store and sessions, data source editor, data views, query consoles, query history, PostgreSQL definitions and materialized views, MongoDB collections, Redis key browser, Kafka workspace. |
 | `packages/webview-ui`      | Vue UI for the webviews, built into `packages/extension/dist/webview`.                      |
+
+## License
+
+Datakit is licensed under the [GNU General Public License v3.0](LICENSE).

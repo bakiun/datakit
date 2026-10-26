@@ -52,7 +52,7 @@ The project is a **pnpm monorepo**, and the code is split into separate packages
 ### 4.1 Folder structure
 
 ```
-vs-code-adapter/
+datakit/
 ├─ packages/
 │  ├─ core/              # Shared types, adapter interface, webview message protocol, shared SQL layer
 │  ├─ adapters/
