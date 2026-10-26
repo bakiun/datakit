@@ -7,3 +7,4 @@ out/**
 test/**
 .vscode-test.mjs
 .vscode-test/**
+images/**

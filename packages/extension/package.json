@@ -2,7 +2,7 @@
   "name": "datakit",
   "displayName": "Datakit",
   "description": "Connect to MySQL, MariaDB, PostgreSQL, MongoDB, Redis and Kafka from VS Code: manage data sources, browse and edit their data.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "bakiun",
   "license": "GPL-3.0-only",
   "private": true,
@@ -554,7 +554,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test:e2e": "node esbuild.mjs --tests && vscode-test",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --skip-license"
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies"
   },
   "dependencies": {
     "@datakit/adapter-common": "workspace:*",
