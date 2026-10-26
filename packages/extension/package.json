@@ -555,7 +555,7 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test:e2e": "node esbuild.mjs --tests && vscode-test",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies"
+    "package": "node esbuild.mjs --production && node -e \"require('node:fs').copyFileSync('../../README.md', 'dist/README.md')\" && vsce package --no-dependencies --readme-path dist/README.md"
   },
   "dependencies": {
     "@datakit/adapter-common": "workspace:*",

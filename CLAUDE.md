@@ -66,6 +66,7 @@ datakit/
 │  └─ webview-ui/        # Vue 3 + Vite UI
 ├─ docker/               # docker-compose servers for development and testing
 ├─ CLAUDE.md
+├─ CONTRIBUTING.md
 ├─ README.md
 ├─ package.json          # Root scripts: build, test, typecheck, package
 ├─ pnpm-workspace.yaml

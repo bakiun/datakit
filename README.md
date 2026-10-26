@@ -1,86 +1,99 @@
-# Datakit — VS Code data extension
+# Datakit
 
-Connect to database servers from VS Code and work with their data. Supported engines: **MySQL / MariaDB**, **PostgreSQL**, **MongoDB**, **Redis** and **Kafka**.
-Create and edit data sources (or paste a connection URL) and test the connection. The Data Sources tree groups them in
-Development, Staging and Production folders by their Environment; on Production ones every write asks for confirmation. For MySQL and MariaDB, browse
-databases, tables, views and routines, and double-click a table to open its data view: a SQL script editor whose last query fills a grid that
-pages, sorts, edits and exports rows. Query consoles (`console-1.sql` under a data source) run scripts in a database
-of your choice, with Messages and Execution Plan tabs. The filter in the Data Sources title bar searches the tables
-of connected data sources, and the Query History view keeps what you ran.
+Connect to **MySQL / MariaDB**, **PostgreSQL**, **MongoDB**, **Redis** and **Kafka** from VS Code. Browse their
+objects, run queries and commands, and view and edit data without leaving the editor.
 
-For PostgreSQL (12 or later), the tree lists the databases of the server, the schemas of each database and their
-tables, views, materialized views, sequences, functions, procedures and types (enums, domains, ranges and composite
-types); the database the data source names and its `public` schema open first, and another database connects when
-you open it. Tables open in the same data view and Structure tab as MySQL's: values keep the server's text (numeric,
-int8, JSON, arrays, intervals, time zones), enums and booleans get a drop-down, edits are written by primary or unique
-key with typed parameters, and a structure change set runs in one transaction. Consoles pick a database and a schema
-(search path), show `RAISE NOTICE` and warnings under Messages, stop a running statement with `pg_cancel_backend`,
-and explain statements with `EXPLAIN` or `EXPLAIN ANALYZE` (rolled back). Right-click an object for its definition,
-or a materialized view to refresh it. The filter searches the schemas of the database the data source connects to.
+![The New data source form for MySQL: name, environment, host, port, user, password and connection URL, with tabs for SSH / SSL, options and advanced settings](https://raw.githubusercontent.com/bakiun/datakit/main/packages/extension/images/new-data-source.png)
 
-For MongoDB, the tree lists databases and their collections and views; double-click a collection to open it. Find
-documents with a filter, projection and sort in shell syntax (`{ created: { $gt: ISODate("2026-01-01") } }`), see
-them as a list, a table or JSON, edit them in place, insert, delete and update by filter, run aggregation pipelines,
-explain queries, manage indexes, sample the schema, export to JSON or CSV, and run common mongosh commands in the
-shell under it.
+## Getting started
 
-For Redis, the tree lists the databases that hold keys; double-click one to open the key browser. The command at its
-top lists keys (`SCAN 0 MATCH user:* COUNT 500 TYPE hash`, or `KEYS`, which runs as SCAN); other commands typed there run
-like the CLI. Edit strings, hashes (with per-field TTLs on Redis 7.4+), lists, sets, sorted sets and streams, rename keys,
-change TTLs, create and delete keys, export a value, and run commands in the CLI under it.
+1. Open the **Datakit** view in the Activity Bar.
+2. Click **New Data Source**, pick the server type, and fill in the form or paste a connection URL.
+3. Click **Test Connection**, then **Save & connect**.
+4. Expand the data source in the **Data Sources** tree and double-click an object to open it.
 
-For Kafka, the tree lists the sections of the Kafka workspace; double-click one to open it. The workspace shows the
-cluster overview and its health, brokers and their dynamic settings, topics (create, clone, clear, delete, settings,
-partitions), the messages of a topic with filters, a live stream, produce and a dump to JSON Lines, consumer groups
-with lag and offset resets, and ACLs. With their URLs set on the data source it also shows Schema Registry subjects,
-Kafka Connect connectors and a ksqlDB editor.
+## Data sources
 
-Project standards are in [CLAUDE.md](CLAUDE.md).
+- Create and edit connections with a form or a connection URL, and test them before saving.
+- Connect through an SSH tunnel (password, private key or SSH agent) and use SSL / TLS.
+- Passwords are kept in VS Code's secret storage, never in settings.
+- Data sources are grouped by their Environment into **Development**, **Staging** and **Production** folders. On
+  Production data sources, every write asks for confirmation.
+- The filter in the Data Sources title bar matches data source names and searches the tables, views and routines of
+  connected MySQL, MariaDB and PostgreSQL data sources.
+- The **Query History** view keeps the queries you ran, ready to open again or copy.
 
-## Development
+## MySQL and MariaDB
 
-Requires Node.js 24 LTS (24.22.1 or later; `nvm use` reads `.nvmrc`), pnpm and Docker.
+![A MySQL table open in the data view: a SQL editor above a paged, editable grid of rows](https://raw.githubusercontent.com/bakiun/datakit/main/packages/extension/images/table-data.png)
 
-```sh
-git clone https://github.com/bakiun/datakit.git
-cd datakit
-pnpm install
-pnpm build          # webview UI + extension bundle
-pnpm typecheck
-pnpm test           # unit tests and the adapter integration tests (Testcontainers, Docker)
-pnpm test:e2e       # starts docker/docker-compose.yml and runs the extension inside VS Code
-pnpm package        # packages/extension/datakit-<version>.vsix
-```
+- Browse databases, tables, views and routines.
+- Double-click a table to open its data view: a SQL editor whose last query fills a grid that pages, sorts, edits and
+  exports rows.
+- Change a table's columns and indexes on the Structure tab.
+- Query consoles (`console-1.sql` and so on, listed under the data source) run scripts against the database of your
+  choice, with Messages and Execution Plan tabs.
 
-- **Run the extension:** press F5 ("Run Extension").
-- **Local servers:** `docker compose -f docker/docker-compose.yml up -d` starts MySQL 8.4 on port 33306 and
-  MariaDB 11.4 on port 33307 with a sample `shop` database (user `app`, password `app-secret`), and Redis 8.0 on
-  port 36379 (password `datakit`). Kafka 4.0 listens on 39092 (PLAINTEXT) and 39094 (SASL PLAIN, users `admin` and
-  `app`, password `datakit`), with Schema Registry on 38081 and Kafka Connect on 38083; ksqlDB on 38088 starts
-  with `--profile ksqldb`. MongoDB 8 listens on 37017 (user `root`, password `datakit`) with a sample `shop`
-  database. PostgreSQL 17 listens on 35432 (user `app`, password `app-secret`; superuser `postgres`, password
-  `datakit`) with the sample databases `shop` (schemas `public` and `inventory`) and `analytics`.
-- **Work on the webview in a browser:** `pnpm dev:webview` serves the data source editor with a mock host.
-  Query flags: `?edit` (edit an existing data source), `?view=tableData` (the data view, `&readonly`, `&postgres`),
-  `?view=queryConsole` (the query console, `&postgres`), `?view=redisKeys` (the Redis key browser), `?view=kafkaWorkspace`
-  (the Kafka workspace, `&readonly`, `&noservices`, `&production`), `?view=mongoCollection` (a MongoDB collection,
-  `&readonly`, `&view-collection`), `?theme=light`.
-  A host named `fail` makes Test Connection fail; a WHERE condition containing `fail` makes the data query fail.
-- **e2e without downloading VS Code:** set `VSCODE_TEST_PATH` to an installed VS Code binary, e.g.
-  `/Applications/Visual Studio Code.app/Contents/MacOS/Code`.
+## PostgreSQL (12 or later)
 
-| Package                    | Contents                                                                                     |
-| -------------------------- | -------------------------------------------------------------------------------------------- |
-| `packages/core`            | Data source model, validation, connection URL, webview protocol, SQL session contract and SQL dialects (MySQL, PostgreSQL). |
-| `packages/adapters/common` | Node helpers shared by adapters: SSH tunnel (ssh2), TLS and key files, connection errors.    |
-| `packages/adapters/mysql`  | MySQL and MariaDB adapter (mysql2).                                                          |
-| `packages/adapters/postgres` | PostgreSQL adapter (pg, pg-cursor for streamed exports).                                   |
-| `packages/adapters/redis`  | Redis adapter (node-redis).                                                                  |
-| `packages/adapters/mongodb` | MongoDB adapter (mongodb, mongodb-query-parser) with a shell for common mongosh commands.  |
-| `packages/adapters/kafka`  | Kafka adapter (@platformatic/kafka) and REST clients for Schema Registry, Kafka Connect, ksqlDB. |
-| `packages/extension`       | Activation, Data Sources tree and filter, commands, connection store and sessions, data source editor, data views, query consoles, query history, PostgreSQL definitions and materialized views, MongoDB collections, Redis key browser, Kafka workspace. |
-| `packages/webview-ui`      | Vue UI for the webviews, built into `packages/extension/dist/webview`.                      |
+- Browse databases, schemas, tables, views, materialized views, sequences, functions, procedures and types (enums,
+  domains, ranges and composite types).
+- The database the data source names opens first, on its `public` schema. Opening another database connects to it
+  with a connection of its own, which closes when the data source disconnects.
+- Tables open in the same data view and Structure tab as MySQL's.
+- Values keep the server's own text (numeric, int8, JSON, arrays, intervals, time zones). Enums and booleans get a
+  drop-down.
+- Edits are written by primary or unique key with typed parameters, and a set of structure changes runs in one
+  transaction.
+- Consoles pick a database and a schema (search path), show `RAISE NOTICE` output and warnings under Messages, cancel a
+  running statement with `pg_cancel_backend`, and explain statements with `EXPLAIN` or `EXPLAIN ANALYZE` (rolled back).
+- Right-click an object to see its definition, or a materialized view to refresh it.
+- The filter searches the schemas of the database the data source connects to.
+
+## MongoDB
+
+- Browse databases and their collections and views, and double-click one to open it.
+- Find documents with a filter, projection and sort in shell syntax, e.g.
+  `{ created: { $gt: ISODate("2026-01-01") } }`.
+- View documents as a list, a table or JSON, and edit them in place. Insert documents, and update or delete them by
+  filter.
+- Run aggregation pipelines, explain queries, manage indexes and sample the schema.
+- Export to JSON or CSV, and run common mongosh commands in the built-in shell.
+
+## Redis
+
+- Browse the databases that hold keys, and double-click one to open its key browser.
+- The command at the top of the key browser lists keys with `SCAN` (for example
+  `SCAN 0 MATCH user:* COUNT 500 TYPE hash`). `KEYS` runs as `SCAN`, so large databases stay responsive. Other
+  commands typed there run like in the CLI.
+- Edit strings, hashes (with per-field TTLs on Redis 7.4+), lists, sets, sorted sets and streams.
+- Create, rename and delete keys, change TTLs, and export a value.
+- Run commands in the built-in CLI.
+
+## Kafka
+
+![The Kafka workspace showing the cluster overview: brokers, topics, under-replicated partitions, consumer lag and connector health](https://raw.githubusercontent.com/bakiun/datakit/main/packages/extension/images/kafka-overview.png)
+
+- The tree lists the sections of the Kafka workspace; double-click one to open it in the workspace.
+- See the cluster overview and its health, brokers and their dynamic settings.
+- Manage topics: create, clone, clear, delete, change settings and add partitions.
+- Browse a topic's messages with filters, follow a live stream, produce messages and dump them to JSON Lines.
+- Inspect consumer groups with their lag and reset offsets. Manage ACLs.
+- With their URLs set on the data source: Schema Registry subjects, Kafka Connect connectors and a ksqlDB editor.
+
+## Requirements
+
+VS Code 1.105 or later.
+
+## Feedback
+
+Report bugs and request features on [GitHub Issues](https://github.com/bakiun/datakit/issues).
+
+## Contributing
+
+Building from source, the local test servers and the package layout are described in
+[CONTRIBUTING.md](https://github.com/bakiun/datakit/blob/main/CONTRIBUTING.md).
 
 ## License
 
-Datakit is licensed under the [GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](https://github.com/bakiun/datakit/blob/main/LICENSE)
