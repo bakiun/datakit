@@ -1,0 +1,165 @@
+# Local servers for development (F5) and the end-to-end tests.
+# Ports stay away from the defaults so they do not clash with servers already running on this machine.
+name: datakit-dev
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: datakit
+      MYSQL_DATABASE: shop
+    ports:
+      - "33306:3306"
+    volumes:
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdatakit"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: datakit
+      MARIADB_DATABASE: shop
+    ports:
+      - "33307:3306"
+    volumes:
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # Superuser `postgres`, password `datakit`; docker/postgres/init.sql adds user `app` (password `app-secret`)
+  # with the sample databases `shop` and `analytics`.
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: datakit
+    ports:
+      - "35432:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # Over TCP: the server that runs the init script listens only on its socket.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "app", "-d", "shop"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # Password `datakit`; the end-to-end tests flush database 1 and fill it with sample keys.
+  redis:
+    image: redis:8.0
+    command: ["redis-server", "--requirepass", "datakit"]
+    ports:
+      - "36379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "datakit", "--no-auth-warning", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # KRaft single node. PLAINTEXT on 39092, SASL_PLAINTEXT (PLAIN, users admin and app, password `datakit`) on 39094;
+  # the other containers use the DOCKER listener. ACLs are on but optional, so clients without ACLs still work.
+  kafka:
+    image: apache/kafka:4.0.0
+    hostname: kafka
+    environment:
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,SASL://:9094,DOCKER://:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:39092,SASL://127.0.0.1:39094,DOCKER://kafka:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL:SASL_PLAINTEXT,DOCKER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_LISTENER_NAME_SASL_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="admin" password="datakit" user_admin="datakit" user_app="datakit";
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
+      KAFKA_SUPER_USERS: User:admin;User:ANONYMOUS
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "39092:9092"
+      - "39094:9094"
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 5s
+      timeout: 20s
+      retries: 30
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.9.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9095
+    ports:
+      - "38081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/subjects"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  connect:
+    image: apache/kafka:4.0.0
+    hostname: connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["/opt/kafka/bin/connect-distributed.sh", "/etc/datakit/connect.properties"]
+    volumes:
+      - ./kafka/connect.properties:/etc/datakit/connect.properties:ro
+    ports:
+      - "38083:8083"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8083"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+
+  # Started on demand: docker compose -f docker/docker-compose.yml --profile ksqldb up -d
+  ksqldb:
+    image: confluentinc/ksqldb-server:0.29.0
+    profiles: [ksqldb]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KSQL_BOOTSTRAP_SERVERS: kafka:9095
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_KSQL_SERVICE_ID: datakit_
+      KSQL_KSQL_INTERNAL_TOPIC_REPLICAS: 1
+      KSQL_KSQL_STREAMS_REPLICATION_FACTOR: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "38088:8088"
+
+  # Root user `root`, password `datakit`; docker/mongodb/init.js fills the `shop` database on first start.
+  mongodb:
+    image: mongo:8
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: datakit
+    ports:
+      - "37017:27017"
+    volumes:
+      - ./mongodb/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "-u", "root", "-p", "datakit", "--eval", "db.adminCommand('ping').ok"]
+      interval: 3s
+      timeout: 10s
+      retries: 40

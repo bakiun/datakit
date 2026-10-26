@@ -1,0 +1,343 @@
+/*
+ * Shared by the MongoDB collection screen; everything is under .mongo-collection so other views are not touched.
+ * :where() keeps that prefix out of the specificity, so a component's scoped style overrides these rules.
+ * Every color comes from the VS Code theme; tones mix a theme color with transparency for chip backgrounds.
+ */
+
+.mongo-collection {
+  --m-ok: var(--vscode-testing-iconPassed);
+  --m-warn: var(--vscode-editorWarning-foreground);
+  --m-error: var(--vscode-errorForeground);
+  --m-info: var(--vscode-textLink-foreground);
+  --m-muted: var(--vscode-descriptionForeground);
+  --m-surface: var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+  --m-head: var(--vscode-editorWidget-background);
+  --m-border: var(--vscode-panel-border);
+  --m-accent: var(--vscode-charts-purple, var(--vscode-textLink-foreground));
+}
+
+/* Tones: `tone-*` colors a chip, `t-*` colors text. */
+:where(.mongo-collection) .tone-ok {
+  --tone: var(--m-ok);
+}
+:where(.mongo-collection) .tone-warn {
+  --tone: var(--m-warn);
+}
+:where(.mongo-collection) .tone-error {
+  --tone: var(--m-error);
+}
+:where(.mongo-collection) .tone-info {
+  --tone: var(--m-info);
+}
+:where(.mongo-collection) .tone-muted {
+  --tone: var(--m-muted);
+}
+:where(.mongo-collection) .t-ok {
+  color: var(--m-ok);
+}
+:where(.mongo-collection) .t-warn {
+  color: var(--m-warn);
+}
+:where(.mongo-collection) .t-error {
+  color: var(--m-error);
+}
+:where(.mongo-collection) .t-muted {
+  color: var(--m-muted);
+}
+
+/* Token colors, as the code editor colors them (codeTheme.ts). */
+:where(.mongo-collection) .tok-propertyName {
+  color: var(--vscode-symbolIcon-variableForeground);
+}
+:where(.mongo-collection) .tok-mongoOperator {
+  color: var(--vscode-charts-blue);
+}
+:where(.mongo-collection) .tok-string,
+:where(.mongo-collection) .tok-string2 {
+  color: var(--vscode-debugTokenExpression-string);
+}
+:where(.mongo-collection) .tok-number {
+  color: var(--vscode-debugTokenExpression-number);
+}
+:where(.mongo-collection) .tok-bool,
+:where(.mongo-collection) .tok-keyword {
+  color: var(--vscode-debugTokenExpression-boolean);
+}
+/* Constructors such as ObjectId and ISODate. */
+:where(.mongo-collection) .tok-variableName {
+  color: var(--vscode-symbolIcon-typeParameterForeground);
+}
+:where(.mongo-collection) .tok-comment {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+:where(.mongo-collection) .chip {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--tone, var(--m-muted)) 16%, transparent);
+  color: var(--tone, var(--m-muted));
+  font-family: var(--vscode-font-family);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+:where(.mongo-collection) .caps {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--m-muted);
+}
+:where(.mongo-collection) .empty-state {
+  margin: 0;
+  padding: 18px 12px;
+  font-size: 12px;
+  color: var(--m-muted);
+  line-height: 1.5;
+}
+:where(.mongo-collection) .error-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--m-error);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+:where(.mongo-collection) .error-line .icon {
+  margin-top: 2px;
+}
+:where(.mongo-collection) .warn-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--m-warn);
+}
+
+/* Under a query bar or editor: what the last run did, or why it failed (like the Redis command line's message). */
+:where(.mongo-collection) .message-line {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--m-border);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--m-ok);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+:where(.mongo-collection) .message-line.error {
+  color: var(--m-error);
+}
+:where(.mongo-collection) .message-line.muted {
+  color: var(--m-muted);
+}
+:where(.mongo-collection) .message-line .icon {
+  margin-top: 1px;
+}
+
+/* A labelled input box, like the Redis command line: the label sits inside the border. */
+:where(.mongo-collection) .qfield {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 28px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--vscode-input-border, var(--m-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+}
+:where(.mongo-collection) .qfield:focus-within {
+  border-color: var(--vscode-focusBorder);
+}
+:where(.mongo-collection) .qfield.invalid {
+  border-color: var(--vscode-inputValidation-errorBorder);
+}
+:where(.mongo-collection) .qfield > .qlabel {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--m-accent);
+}
+:where(.mongo-collection) .qfield > input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--vscode-input-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+}
+:where(.mongo-collection) .qfield > input::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+/* Tables: monospace, sticky header. */
+:where(.mongo-collection) .table-box {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--m-border);
+  border-radius: 4px;
+}
+:where(.mongo-collection) .grid {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+}
+:where(.mongo-collection) .grid th,
+:where(.mongo-collection) .grid td {
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--m-border);
+  text-align: left;
+  white-space: nowrap;
+}
+:where(.mongo-collection) .grid tbody tr:last-child td {
+  border-bottom: 0;
+}
+:where(.mongo-collection) .grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--m-head);
+  font-family: var(--vscode-font-family);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--m-muted);
+}
+:where(.mongo-collection) .grid .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+:where(.mongo-collection) .grid tbody tr:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* Controls the base styles do not have. */
+:where(.mongo-collection) .sel {
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--vscode-dropdown-border, var(--m-border));
+  border-radius: 4px;
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  font: inherit;
+  font-size: 12px;
+}
+:where(.mongo-collection) .sel:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+:where(.mongo-collection) .btn.sm {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+:where(.mongo-collection) .btn.xs {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+:where(.mongo-collection) .btn.danger-text:not(:disabled) {
+  color: var(--m-error);
+}
+:where(.mongo-collection) .seg-group {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--vscode-dropdown-border, var(--m-border));
+  border-radius: 4px;
+}
+:where(.mongo-collection) .seg {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  background: var(--m-head);
+  color: var(--vscode-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+:where(.mongo-collection) .seg + .seg {
+  border-left: 1px solid var(--vscode-dropdown-border, var(--m-border));
+}
+:where(.mongo-collection) .seg[aria-pressed='true'] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+:where(.mongo-collection) .seg:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+:where(.mongo-collection) .sep {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--m-border);
+}
+
+/* A labelled field of a form: label text above the control. */
+:where(.mongo-collection) .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+}
+:where(.mongo-collection) .field .hint {
+  color: var(--m-muted);
+}
+:where(.mongo-collection) .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+:where(.mongo-collection) .row > .field {
+  flex: 1 1 140px;
+}
+/* A small editor box inside a form. */
+:where(.mongo-collection) .code-box {
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--vscode-input-border, var(--m-border));
+  border-radius: 4px;
+  background: var(--vscode-editor-background);
+}
+:where(.mongo-collection) .code-box:focus-within {
+  border-color: var(--vscode-focusBorder);
+}
+:where(.mongo-collection) .code-box.invalid {
+  border-color: var(--vscode-inputValidation-errorBorder);
+}
+:where(.mongo-collection) .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

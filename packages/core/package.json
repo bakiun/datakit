@@ -1,0 +1,23 @@
+{
+  "name": "@datakit/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Data source model, validation, webview protocol and the shared SQL session contract. Must not depend on vscode, Node or DOM APIs.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "connection-string": "^5.0.0",
+    "dbgate-query-splitter": "^4.12.0",
+    "string-argv": "^0.4.0"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.5"
+  }
+}

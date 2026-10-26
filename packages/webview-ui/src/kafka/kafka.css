@@ -1,0 +1,343 @@
+/*
+ * Shared by the Kafka workspace screens; everything is under .kafka-workspace so other views are not touched.
+ * :where() keeps that prefix out of the specificity, so a component's scoped style overrides these rules.
+ * Every color comes from the VS Code theme; tones mix a theme color with transparency for chip backgrounds.
+ */
+
+.kafka-workspace {
+  --k-ok: var(--vscode-testing-iconPassed);
+  --k-warn: var(--vscode-editorWarning-foreground);
+  --k-error: var(--vscode-errorForeground);
+  --k-info: var(--vscode-textLink-foreground);
+  --k-muted: var(--vscode-descriptionForeground);
+  --k-star: var(--vscode-charts-yellow, var(--vscode-editorWarning-foreground));
+  --k-surface: var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+  --k-head: var(--vscode-editorWidget-background);
+  --k-border: var(--vscode-panel-border);
+}
+
+/* Tones: `tone-*` colors a chip, `t-*` colors text. */
+:where(.kafka-workspace) .tone-ok {
+  --tone: var(--k-ok);
+}
+:where(.kafka-workspace) .tone-warn {
+  --tone: var(--k-warn);
+}
+:where(.kafka-workspace) .tone-error {
+  --tone: var(--k-error);
+}
+:where(.kafka-workspace) .tone-info {
+  --tone: var(--k-info);
+}
+:where(.kafka-workspace) .tone-muted {
+  --tone: var(--k-muted);
+}
+:where(.kafka-workspace) .t-ok {
+  color: var(--k-ok);
+}
+:where(.kafka-workspace) .t-warn {
+  color: var(--k-warn);
+}
+:where(.kafka-workspace) .t-error {
+  color: var(--k-error);
+}
+:where(.kafka-workspace) .t-muted {
+  color: var(--k-muted);
+}
+:where(.kafka-workspace) .t-info {
+  color: var(--k-info);
+}
+/* Token colors, as in the code editor. */
+:where(.kafka-workspace) .c-name {
+  color: var(--vscode-symbolIcon-propertyForeground, var(--vscode-symbolIcon-variableForeground));
+}
+:where(.kafka-workspace) .c-str {
+  color: var(--vscode-debugTokenExpression-string);
+}
+:where(.kafka-workspace) .c-num {
+  color: var(--vscode-debugTokenExpression-number);
+}
+
+:where(.kafka-workspace) .chip {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--tone, var(--k-muted)) 16%, transparent);
+  color: var(--tone, var(--k-muted));
+  font-family: var(--vscode-font-family);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+:where(.kafka-workspace) .dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tone, var(--k-muted));
+}
+:where(.kafka-workspace) .pulse {
+  animation: kafka-pulse 1.2s ease-in-out infinite;
+}
+@keyframes kafka-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.kafka-workspace) .pulse {
+    animation: none;
+  }
+}
+
+/* A section page: a header row, then a body that scrolls. */
+:where(.kafka-workspace) .page {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+:where(.kafka-workspace) .page-head {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 14px 20px 10px;
+}
+:where(.kafka-workspace) .page-head h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+:where(.kafka-workspace) .page-head .actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+:where(.kafka-workspace) .page-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 20px 16px;
+}
+:where(.kafka-workspace) .caps {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--k-muted);
+}
+:where(.kafka-workspace) .empty-state {
+  margin: 0;
+  padding: 18px 12px;
+  font-size: 12px;
+  color: var(--k-muted);
+  line-height: 1.5;
+}
+:where(.kafka-workspace) .error-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--k-error);
+}
+:where(.kafka-workspace) .warn-line {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--k-warn);
+}
+
+/* Tables: monospace, sticky header, a row button that picks the row. */
+:where(.kafka-workspace) .table-box {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--k-border);
+  border-radius: 4px;
+}
+:where(.kafka-workspace) .grid {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+}
+:where(.kafka-workspace) .grid th,
+:where(.kafka-workspace) .grid td {
+  height: 28px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--k-border);
+  text-align: left;
+  white-space: nowrap;
+}
+:where(.kafka-workspace) .grid tbody tr:last-child td {
+  border-bottom: 0;
+}
+:where(.kafka-workspace) .grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--k-head);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--k-muted);
+}
+:where(.kafka-workspace) .grid .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+:where(.kafka-workspace) .grid .pad0 {
+  padding: 0;
+}
+:where(.kafka-workspace) .grid .tick {
+  width: 1px;
+  padding: 0 8px 0 11px;
+}
+:where(.kafka-workspace) .grid .wrap {
+  white-space: normal;
+}
+:where(.kafka-workspace) .grid tbody tr:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+:where(.kafka-workspace) .grid tbody tr.checked {
+  background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+}
+:where(.kafka-workspace) .grid tbody tr.picked {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+  outline: 1px dotted var(--vscode-contrastActiveBorder, transparent);
+  outline-offset: -1px;
+}
+:where(.kafka-workspace) .grid tr.picked :is(.c-name, .c-str, .c-num, .t-muted) {
+  color: inherit;
+}
+:where(.kafka-workspace) .rowb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+:where(.kafka-workspace) .rowb:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* Controls the base styles do not have. */
+:where(.kafka-workspace) .sel {
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--vscode-dropdown-border, var(--k-border));
+  border-radius: 4px;
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  font: inherit;
+  font-size: 12px;
+}
+:where(.kafka-workspace) .sel:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder);
+}
+:where(.kafka-workspace) .btn.sm {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+:where(.kafka-workspace) .btn.danger {
+  border-color: transparent;
+  background: var(--vscode-statusBarItem-errorBackground, var(--k-error));
+  color: var(--vscode-statusBarItem-errorForeground, var(--vscode-button-foreground));
+}
+:where(.kafka-workspace) .btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vscode-statusBarItem-errorBackground, var(--k-error)) 85%, var(--vscode-editor-background));
+}
+:where(.kafka-workspace) .btn.danger-text {
+  color: var(--k-error);
+}
+:where(.kafka-workspace) .seg-group {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--vscode-dropdown-border, var(--k-border));
+  border-radius: 4px;
+}
+:where(.kafka-workspace) .seg {
+  height: 22px;
+  padding: 0 10px;
+  border: 0;
+  background: var(--k-head);
+  color: var(--vscode-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+:where(.kafka-workspace) .seg[aria-pressed='true'] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+:where(.kafka-workspace) .seg:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+/* A labelled field of a form: label text above the control. */
+:where(.kafka-workspace) .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+}
+:where(.kafka-workspace) .field .hint {
+  color: var(--k-muted);
+}
+:where(.kafka-workspace) textarea.fld {
+  height: auto;
+  padding: 6px 8px;
+  line-height: 1.5;
+  resize: vertical;
+}
+:where(.kafka-workspace) .fld:disabled {
+  opacity: 0.6;
+}
+:where(.kafka-workspace) .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+:where(.kafka-workspace) .row > .field {
+  flex: 1 1 120px;
+}
+:where(.kafka-workspace) .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

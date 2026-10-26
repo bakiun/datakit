@@ -1,0 +1,36 @@
+{
+  "name": "@datakit/webview-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vue UI rendered inside the extension's webviews. Builds into packages/extension/dist/webview.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "watch": "vite build --watch --mode development",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@datakit/core": "workspace:*",
+    "@lezer/common": "^1.5.4",
+    "@lezer/highlight": "^1.2.5",
+    "sql-formatter": "^15.9.0",
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@types/vscode-webview": "^1.57.5",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "vue-tsc": "^3.3.13"
+  }
+}

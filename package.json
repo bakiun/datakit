@@ -1,0 +1,20 @@
+{
+  "name": "datakit-vs-code-adapter",
+  "private": true,
+  "packageManager": "pnpm@11.23.0",
+  "engines": {
+    "node": ">=24.22.1"
+  },
+  "scripts": {
+    "build": "pnpm --filter @datakit/webview-ui run build && pnpm --filter datakit run build",
+    "watch": "pnpm -r --parallel run watch",
+    "dev:webview": "pnpm --filter @datakit/webview-ui run dev",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "test:e2e": "docker compose -f docker/docker-compose.yml up -d --wait && pnpm run build && pnpm --filter datakit run test:e2e",
+    "package": "pnpm run build && pnpm --filter datakit run package"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}

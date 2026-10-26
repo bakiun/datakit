@@ -1,0 +1,575 @@
+{
+  "name": "datakit",
+  "displayName": "Datakit",
+  "description": "Connect to MySQL, MariaDB, PostgreSQL, MongoDB, Redis and Kafka from VS Code: manage data sources, browse and edit their data.",
+  "version": "0.0.1",
+  "publisher": "datakit",
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bakiun/datakit.git"
+  },
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "mysql",
+    "mariadb",
+    "postgresql",
+    "mongodb",
+    "redis",
+    "kafka",
+    "database",
+    "sql"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace",
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "datakit",
+          "title": "Datakit",
+          "icon": "media/datakit.svg"
+        }
+      ]
+    },
+    "views": {
+      "datakit": [
+        {
+          "id": "datakit.dataSources",
+          "name": "Data Sources",
+          "icon": "media/datakit.svg",
+          "contextualTitle": "Datakit"
+        },
+        {
+          "id": "datakit.queryHistory",
+          "name": "Query History",
+          "icon": "media/datakit.svg",
+          "contextualTitle": "Datakit",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "datakit.dataSources",
+        "contents": "No data sources yet.\n[Add data source](command:datakit.addDataSource)"
+      },
+      {
+        "view": "datakit.queryHistory",
+        "contents": "No queries yet. Statements you run in a data view or a query console are listed here."
+      }
+    ],
+    "commands": [
+      {
+        "command": "datakit.addDataSource",
+        "title": "New Data Source",
+        "category": "Datakit",
+        "icon": "$(add)"
+      },
+      {
+        "command": "datakit.refreshAll",
+        "title": "Refresh All",
+        "category": "Datakit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "datakit.filterDataSources",
+        "title": "Filter",
+        "category": "Datakit",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "datakit.changeFilter",
+        "title": "Change Filter",
+        "category": "Datakit",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "datakit.clearFilter",
+        "title": "Clear Filter",
+        "category": "Datakit",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "datakit.editDataSource",
+        "title": "Edit Data Source",
+        "category": "Datakit",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "datakit.refreshDataSource",
+        "title": "Refresh Data Source",
+        "category": "Datakit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "datakit.deleteDataSource",
+        "title": "Delete Data Source",
+        "category": "Datakit",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "datakit.connectDataSource",
+        "title": "Connect",
+        "category": "Datakit",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "datakit.disconnectDataSource",
+        "title": "Disconnect",
+        "category": "Datakit",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "datakit.newConsole",
+        "title": "New Query Console",
+        "category": "Datakit",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "datakit.openConsole",
+        "title": "Open Console",
+        "category": "Datakit"
+      },
+      {
+        "command": "datakit.renameConsole",
+        "title": "Rename Console",
+        "category": "Datakit",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "datakit.deleteConsole",
+        "title": "Delete Console",
+        "category": "Datakit",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "datakit.openTableData",
+        "title": "Open Data",
+        "category": "Datakit",
+        "icon": "$(table)"
+      },
+      {
+        "command": "datakit.showDefinition",
+        "title": "Show Definition",
+        "category": "Datakit",
+        "icon": "$(code)"
+      },
+      {
+        "command": "datakit.refreshMaterializedView",
+        "title": "Refresh Materialized View",
+        "category": "Datakit",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "datakit.openRedisKeys",
+        "title": "Browse Keys",
+        "category": "Datakit",
+        "icon": "$(key)"
+      },
+      {
+        "command": "datakit.openKafkaWorkspace",
+        "title": "Open Workspace",
+        "category": "Datakit",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "datakit.openMongoCollection",
+        "title": "Open Collection",
+        "category": "Datakit",
+        "icon": "$(json)"
+      },
+      {
+        "command": "datakit.newMongoCollection",
+        "title": "New Collection…",
+        "category": "Datakit",
+        "icon": "$(add)"
+      },
+      {
+        "command": "datakit.newMongoDatabase",
+        "title": "New Database…",
+        "category": "Datakit",
+        "icon": "$(add)"
+      },
+      {
+        "command": "datakit.renameMongoCollection",
+        "title": "Rename Collection…",
+        "category": "Datakit"
+      },
+      {
+        "command": "datakit.dropMongoCollection",
+        "title": "Drop Collection…",
+        "category": "Datakit",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "datakit.dropMongoDatabase",
+        "title": "Drop Database…",
+        "category": "Datakit"
+      },
+      {
+        "command": "datakit.objectClicked",
+        "title": "Open Data on Double-Click",
+        "category": "Datakit"
+      },
+      {
+        "command": "datakit.openHistoryEntry",
+        "title": "Open in Query Console",
+        "category": "Datakit",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "datakit.copyHistoryEntry",
+        "title": "Copy Query",
+        "category": "Datakit",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "datakit.deleteHistoryEntry",
+        "title": "Remove from History",
+        "category": "Datakit",
+        "icon": "$(close)"
+      },
+      {
+        "command": "datakit.clearHistory",
+        "title": "Clear Query History",
+        "category": "Datakit",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "datakit.addDataSource",
+          "when": "view == datakit.dataSources",
+          "group": "navigation@1"
+        },
+        {
+          "command": "datakit.refreshAll",
+          "when": "view == datakit.dataSources",
+          "group": "navigation@2"
+        },
+        {
+          "command": "datakit.filterDataSources",
+          "when": "view == datakit.dataSources && !datakit.dataSources.filtered",
+          "group": "navigation@3"
+        },
+        {
+          "command": "datakit.changeFilter",
+          "when": "view == datakit.dataSources && datakit.dataSources.filtered",
+          "group": "navigation@3"
+        },
+        {
+          "command": "datakit.clearFilter",
+          "when": "view == datakit.dataSources && datakit.dataSources.filtered",
+          "group": "navigation@4"
+        },
+        {
+          "command": "datakit.clearHistory",
+          "when": "view == datakit.queryHistory",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "datakit.newConsole",
+          "when": "view == datakit.dataSources && viewItem =~ /^(dataSource\\.\\w+\\.(mysql|postgres)|database|pgSchema)$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "datakit.newConsole",
+          "when": "view == datakit.dataSources && viewItem =~ /^(dataSource\\.\\w+\\.(mysql|postgres)|database|pgSchema)$/",
+          "group": "0_console@1"
+        },
+        {
+          "command": "datakit.renameConsole",
+          "when": "view == datakit.dataSources && viewItem == console",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.deleteConsole",
+          "when": "view == datakit.dataSources && viewItem == console",
+          "group": "inline@2"
+        },
+        {
+          "command": "datakit.renameConsole",
+          "when": "view == datakit.dataSources && viewItem == console",
+          "group": "1_manage@1"
+        },
+        {
+          "command": "datakit.deleteConsole",
+          "when": "view == datakit.dataSources && viewItem == console",
+          "group": "2_delete@1"
+        },
+        {
+          "command": "datakit.openTableData",
+          "when": "view == datakit.dataSources && viewItem =~ /^(table|view|pgTable|pgView|pgMaterializedView)$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "datakit.showDefinition",
+          "when": "view == datakit.dataSources && viewItem =~ /^pg(Table|View|MaterializedView|Sequence|Function|Procedure|Type)$/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "datakit.showDefinition",
+          "when": "view == datakit.dataSources && viewItem =~ /^pg(Sequence|Function|Procedure|Type)$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.refreshMaterializedView",
+          "when": "view == datakit.dataSources && viewItem == pgMaterializedView",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.refreshMaterializedView",
+          "when": "view == datakit.dataSources && viewItem == pgMaterializedView",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "datakit.editDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.refreshDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "inline@2"
+        },
+        {
+          "command": "datakit.deleteDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "inline@3"
+        },
+        {
+          "command": "datakit.connectDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\.disconnected\\./",
+          "group": "1_connection@1"
+        },
+        {
+          "command": "datakit.disconnectDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\.(connected|connecting)\\./",
+          "group": "1_connection@1"
+        },
+        {
+          "command": "datakit.editDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "datakit.refreshDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "datakit.deleteDataSource",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\./",
+          "group": "3_delete@1"
+        },
+        {
+          "command": "datakit.copyHistoryEntry",
+          "when": "view == datakit.queryHistory && viewItem == historyEntry",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.deleteHistoryEntry",
+          "when": "view == datakit.queryHistory && viewItem == historyEntry",
+          "group": "inline@2"
+        },
+        {
+          "command": "datakit.openHistoryEntry",
+          "when": "view == datakit.queryHistory && viewItem == historyEntry",
+          "group": "1_open@1"
+        },
+        {
+          "command": "datakit.copyHistoryEntry",
+          "when": "view == datakit.queryHistory && viewItem == historyEntry",
+          "group": "1_open@2"
+        },
+        {
+          "command": "datakit.deleteHistoryEntry",
+          "when": "view == datakit.queryHistory && viewItem == historyEntry",
+          "group": "2_delete@1"
+        },
+        {
+          "command": "datakit.openRedisKeys",
+          "when": "view == datakit.dataSources && viewItem == redisDatabase",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.openRedisKeys",
+          "when": "view == datakit.dataSources && viewItem == redisDatabase",
+          "group": "1_open@1"
+        },
+        {
+          "command": "datakit.openKafkaWorkspace",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\.\\w+\\.kafka$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "datakit.openKafkaWorkspace",
+          "when": "view == datakit.dataSources && viewItem =~ /^dataSource\\.\\w+\\.kafka$/",
+          "group": "0_open@1"
+        },
+        {
+          "command": "datakit.openMongoCollection",
+          "when": "view == datakit.dataSources && viewItem =~ /^mongo(Collection|View)$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.openMongoCollection",
+          "when": "view == datakit.dataSources && viewItem =~ /^mongo(Collection|View)$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "datakit.renameMongoCollection",
+          "when": "view == datakit.dataSources && viewItem == mongoCollection",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "datakit.dropMongoCollection",
+          "when": "view == datakit.dataSources && viewItem =~ /^mongo(Collection|View)$/",
+          "group": "3_delete@1"
+        },
+        {
+          "command": "datakit.newMongoCollection",
+          "when": "view == datakit.dataSources && viewItem == mongoDatabase",
+          "group": "inline@1"
+        },
+        {
+          "command": "datakit.newMongoCollection",
+          "when": "view == datakit.dataSources && viewItem == mongoDatabase",
+          "group": "0_new@1"
+        },
+        {
+          "command": "datakit.dropMongoDatabase",
+          "when": "view == datakit.dataSources && viewItem == mongoDatabase",
+          "group": "3_delete@1"
+        },
+        {
+          "command": "datakit.newMongoDatabase",
+          "when": "view == datakit.dataSources && viewItem == dataSource.connected.mongodb",
+          "group": "0_new@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "datakit.openTableData",
+          "when": "false"
+        },
+        {
+          "command": "datakit.objectClicked",
+          "when": "false"
+        },
+        {
+          "command": "datakit.changeFilter",
+          "when": "false"
+        },
+        {
+          "command": "datakit.clearFilter",
+          "when": "datakit.dataSources.filtered"
+        },
+        {
+          "command": "datakit.openConsole",
+          "when": "false"
+        },
+        {
+          "command": "datakit.renameConsole",
+          "when": "false"
+        },
+        {
+          "command": "datakit.deleteConsole",
+          "when": "false"
+        },
+        {
+          "command": "datakit.openHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "datakit.copyHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "datakit.deleteHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "datakit.showDefinition",
+          "when": "false"
+        },
+        {
+          "command": "datakit.refreshMaterializedView",
+          "when": "false"
+        },
+        {
+          "command": "datakit.openRedisKeys",
+          "when": "false"
+        },
+        {
+          "command": "datakit.openMongoCollection",
+          "when": "false"
+        },
+        {
+          "command": "datakit.newMongoCollection",
+          "when": "false"
+        },
+        {
+          "command": "datakit.newMongoDatabase",
+          "when": "false"
+        },
+        {
+          "command": "datakit.renameMongoCollection",
+          "when": "false"
+        },
+        {
+          "command": "datakit.dropMongoCollection",
+          "when": "false"
+        },
+        {
+          "command": "datakit.dropMongoDatabase",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "node esbuild.mjs --tests && vscode-test",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --skip-license"
+  },
+  "dependencies": {
+    "@datakit/adapter-common": "workspace:*",
+    "@datakit/adapter-kafka": "workspace:*",
+    "@datakit/adapter-mongodb": "workspace:*",
+    "@datakit/adapter-mysql": "workspace:*",
+    "@datakit/adapter-postgres": "workspace:*",
+    "@datakit/adapter-redis": "workspace:*",
+    "@datakit/core": "workspace:*",
+    "csv-stringify": "^6.9.0",
+    "markdown-table": "^3.0.4",
+    "write-excel-file": "^4.1.1"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.20.5",
+    "@types/vscode": "~1.105.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2"
+  }
+}

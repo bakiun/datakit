@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      // Other installed extensions stay off, as in the end-to-end tests, so the debug console shows only Datakit.
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/packages/extension", "--disable-extensions"],
+      "outFiles": ["${workspaceFolder}/packages/extension/dist/**/*.js"],
+      "preLaunchTask": "build"
+    }
+  ]
+}

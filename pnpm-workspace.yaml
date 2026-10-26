@@ -1,0 +1,12 @@
+packages:
+  - packages/*
+  - packages/adapters/*
+# Refuse to install on a Node.js older than engines.node in package.json, which carries the latest security fixes.
+engineStrict: true
+# Native add-ons stay off: ssh2 falls back to pure JS, which keeps one universal VSIX.
+allowBuilds:
+  '@vscode/vsce-sign': true
+  esbuild: true
+  ssh2: false
+  cpu-features: false
+  protobufjs: false

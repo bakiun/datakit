@@ -1,0 +1,301 @@
+import {
+  isPageableQuery,
+  splitSqlScript,
+  type ExportFormat,
+  type ExportScope,
+  type LoadedPage,
+  type ScriptStatement,
+  type SortKey,
+  type SqlDialect,
+  type TableDataHostMessage,
+  type TableDataInit,
+  type TableDataWebviewMessage,
+} from '@datakit/core';
+import { computed, markRaw, reactive, ref, type Ref } from 'vue';
+import { postToHost } from '../host';
+import type ScriptEditor from './ScriptEditor.vue';
+import { applyPaging, readPaging, unpaged, withoutLimit } from './scriptClauses';
+import { existingRowId, useTableChanges, type RowId } from './tableChanges';
+
+export type ScriptEditorApi = InstanceType<typeof ScriptEditor>;
+
+/**
+ * What the data view and the query console share: running the script, paging and sorting the shown query,
+ * grid edits and transactions. `handle` takes the host messages about them and returns false for others.
+ * The result is reactive, so templates read `view.loading` without `.value`.
+ */
+export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEditorApi | undefined>, script: Ref<string>) {
+  const page = ref<LoadedPage | null>(null);
+  const runError = ref<string | null>(null);
+  /** Where the statement that failed is in the editor. */
+  const failedAt = ref<{ from: number; to: number } | null>(null);
+  const summary = ref('');
+  const loading = ref(false);
+  const submitting = ref(false);
+  const submitError = ref<string | null>(null);
+  const notice = ref('');
+  const autoCommit = ref(true);
+  const transaction = ref({ open: false, changes: 0 });
+  const exportFormat = ref<ExportFormat>('csv');
+  const exportScope = ref<ExportScope>('page');
+  const selected = ref(new Set<RowId>());
+
+  const dialect = computed<SqlDialect>(() => init.value?.dialect ?? 'mysql');
+  const changes = useTableChanges(page);
+  const post = (message: TableDataWebviewMessage) => postToHost(message);
+  const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+  const pending = computed(() => changes.count.value);
+  const locked = computed(() => pending.value > 0 || loading.value || submitting.value);
+  /** Sorting and paging of the shown query, read from its ORDER BY and LIMIT. */
+  const paging = computed(() =>
+    page.value && isPageableQuery(page.value.statement.text, dialect.value) ? readPaging(page.value.statement.text, dialect.value) : null,
+  );
+  const sort = computed(() => paging.value?.sort ?? []);
+  const pageable = computed(() => paging.value !== null && paging.value.limit !== null);
+  const limit = computed(() => paging.value?.limit ?? init.value?.pageSize ?? 100);
+  const offset = computed(() => paging.value?.offset ?? 0);
+  const total = computed(() => page.value?.total ?? null);
+  const rowCount = computed(() => page.value?.rows.length ?? 0);
+  const hasNext = computed(() => (total.value === null ? rowCount.value >= limit.value : offset.value + limit.value < total.value));
+  const pageNo = computed(() => Math.floor(offset.value / limit.value) + 1);
+  const pageCount = computed(() => (total.value === null ? null : Math.max(1, Math.ceil(total.value / limit.value))));
+  const editable = computed(() => !!page.value?.editable && !submitting.value);
+  const readOnly = computed(() => page.value?.readOnlyReason ?? null);
+  const rowIds = computed(() => [...changes.inserts.value.map((r) => r.id), ...(page.value?.rows.map((_, i) => existingRowId(i)) ?? [])]);
+  const selection = computed(() => rowIds.value.filter((id) => selected.value.has(id)));
+
+  /** What the last run showed: rows, timing and the rest of the script. Errors are shown apart. */
+  const runInfo = computed(() => {
+    if (loading.value) return 'Running…';
+    const p = page.value;
+    if (runError.value) return '';
+    if (!p) return summary.value;
+    const took = `query took ${(p.durationMs / 1000).toFixed(4)} seconds`;
+    let text: string;
+    if (!p.rows.length) text = `${init.value?.product ?? 'The server'} returned an empty result set (zero rows); ${took}.`;
+    else if (!pageable.value) text = `${p.rows.length.toLocaleString('en-US')} rows (${took}).`;
+    else {
+      const range = `${offset.value + 1}–${offset.value + p.rows.length}`;
+      text = `Showing rows ${range} (${total.value === null ? '' : `${total.value.toLocaleString('en-US')} total, `}${took}).`;
+    }
+    return summary.value ? `${text} · ${summary.value}` : text;
+  });
+
+  function statementOf(part: { text: string; from: number; to: number }): ScriptStatement {
+    if (!isPageableQuery(part.text, dialect.value)) return { ...part };
+    return { ...part, unpaged: unpaged(part.text, dialect.value), unlimited: withoutLimit(part.text, dialect.value) };
+  }
+
+  /**
+   * Runs the script, or the selection. The last query gets a LIMIT if it has none, so a big table is never read in full.
+   * `record: false` keeps the statements out of the query history.
+   */
+  function run(options: { record?: boolean } = {}): void {
+    if (locked.value || !editor.value) return;
+    const source = editor.value.selection() ?? { from: 0, text: script.value };
+    let parts = splitSqlScript(source.text, dialect.value).map((p) => ({ text: p.text, from: source.from + p.from, to: source.from + p.to }));
+    if (!parts.length) return;
+    const last = [...parts].reverse().find((p) => isPageableQuery(p.text, dialect.value));
+    if (last && readPaging(last.text, dialect.value).limit === null) {
+      const text = applyPaging(last.text, dialect.value, { limit: init.value?.pageSize ?? 100, offset: 0 });
+      editor.value.replace(last.from, last.to, text);
+      const shift = text.length - last.text.length;
+      parts = parts.map((p) => (p === last ? { ...p, text, to: p.from + text.length } : p.from > last.from ? { ...p, from: p.from + shift, to: p.to + shift } : p));
+    }
+    loading.value = true;
+    runError.value = null;
+    failedAt.value = null;
+    post({ type: 'run', statements: parts.map(statementOf), autoCommit: autoCommit.value, ...(options.record === false ? { record: false } : {}) });
+  }
+
+  /** Rewrites the shown query's ORDER BY or LIMIT in the script and runs that query again. */
+  function repage(change: { sort?: SortKey[]; limit?: number; offset?: number }): void {
+    const current = page.value?.statement;
+    if (!current || !editor.value || locked.value) return;
+    if (editor.value.slice(current.from, current.to) !== current.text) {
+      showNotice('The script changed since it ran; press Run first.');
+      return;
+    }
+    const text = applyPaging(current.text, dialect.value, change);
+    editor.value.replace(current.from, current.to, text);
+    loading.value = true;
+    runError.value = null;
+    post({ type: 'query', statement: statementOf({ text, from: current.from, to: current.from + text.length }) });
+  }
+
+  function reload(): void {
+    if (!page.value) return run();
+    loading.value = true;
+    runError.value = null;
+    post({ type: 'query', statement: clone(page.value.statement) });
+  }
+
+  /** Click sorts by one column (asc → desc → off); Shift+click adds, flips or removes a column. */
+  function sortBy(column: string, additive: boolean): void {
+    const current = sort.value;
+    const index = current.findIndex((k) => k.column === column);
+    let next: SortKey[];
+    if (additive) {
+      next = [...current];
+      if (index < 0) next.push({ column, direction: 'asc' });
+      else if (next[index]!.direction === 'asc') next[index] = { column, direction: 'desc' };
+      else next.splice(index, 1);
+    } else if (current.length === 1 && index === 0) {
+      next = current[0]!.direction === 'asc' ? [{ column, direction: 'desc' }] : [];
+    } else {
+      next = [{ column, direction: 'asc' }];
+    }
+    repage({ sort: next, limit: limit.value, offset: 0 });
+  }
+
+  function setLimit(value: number): void {
+    repage({ limit: value, offset: 0 });
+  }
+
+  function deleteSelected(): void {
+    changes.remove(selection.value);
+    selected.value = new Set();
+  }
+
+  function duplicateSelected(): void {
+    const [id] = selection.value;
+    if (id) changes.duplicate(id);
+    selected.value = new Set();
+  }
+
+  function submit(): void {
+    if (!pending.value || submitting.value || !page.value) return;
+    submitting.value = true;
+    submitError.value = null;
+    post({ type: 'submit', changes: clone(changes.changes()), autoCommit: autoCommit.value, statement: clone(page.value.statement) });
+  }
+
+  function revert(): void {
+    changes.reset();
+    submitError.value = null;
+  }
+
+  function endTransaction(type: 'commit' | 'rollback'): void {
+    loading.value = true;
+    post({ type, statement: page.value ? clone(page.value.statement) : null });
+  }
+
+  function setTx(auto: boolean): void {
+    autoCommit.value = auto;
+    post({ type: 'txMode', autoCommit: auto });
+  }
+
+  function exportRows(): void {
+    post({ type: 'export', format: exportFormat.value, scope: exportScope.value });
+  }
+
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function showNotice(message: string): void {
+    notice.value = message;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice.value = ''), 4000);
+  }
+
+  /** Ctrl/Cmd+Enter outside the editor submits grid changes, or runs the script. */
+  function onKey(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+    if ((event.target as HTMLElement).closest('.cm-editor')) return;
+    event.preventDefault();
+    if (pending.value) submit();
+    else run();
+  }
+
+  function handle(message: TableDataHostMessage): boolean {
+    switch (message.type) {
+      case 'page':
+        page.value = message.page;
+        runError.value = null;
+        summary.value = message.summary ?? '';
+        loading.value = false;
+        submitting.value = false;
+        submitError.value = null;
+        changes.reset();
+        selected.value = new Set();
+        return true;
+      case 'ran':
+        loading.value = false;
+        runError.value = null;
+        summary.value = message.summary;
+        return true;
+      case 'runFailed':
+        loading.value = false;
+        runError.value = message.message;
+        failedAt.value = message.failed ?? null;
+        summary.value = message.summary ?? '';
+        return true;
+      case 'submitFailed':
+        loading.value = false;
+        submitting.value = false;
+        submitError.value = message.message;
+        return true;
+      case 'transaction':
+        transaction.value = { open: message.open, changes: message.changes };
+        return true;
+      case 'notice':
+        showNotice(message.message);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  return reactive({
+    init,
+    page,
+    runError,
+    failedAt,
+    summary,
+    loading,
+    submitting,
+    submitError,
+    notice,
+    autoCommit,
+    transaction,
+    exportFormat,
+    exportScope,
+    selected,
+    dialect,
+    // The grid calls its functions; it stays a plain object so its refs keep their type.
+    changes: markRaw(changes),
+    pending,
+    locked,
+    sort,
+    pageable,
+    limit,
+    offset,
+    total,
+    rowCount,
+    hasNext,
+    pageNo,
+    pageCount,
+    editable,
+    readOnly,
+    rowIds,
+    selection,
+    runInfo,
+    post,
+    run,
+    repage,
+    reload,
+    sortBy,
+    setLimit,
+    deleteSelected,
+    duplicateSelected,
+    submit,
+    revert,
+    endTransaction,
+    setTx,
+    exportRows,
+    showNotice,
+    onKey,
+    handle,
+  });
+}
+
+export type SqlView = ReturnType<typeof useSqlView>;
