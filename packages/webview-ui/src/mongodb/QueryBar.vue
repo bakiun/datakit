@@ -12,13 +12,14 @@ export const emptyDraft = (): QueryDraft => ({ filter: '', projection: '', sort:
 </script>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
-import { MOD_KEY, parseSkip, type QueryField } from './format';
+import { SUBMIT_KEY } from '../components/shortcuts';
+import { parseSkip, type QueryField } from './format';
 
 /**
  * The find query: Filter on top, Project, Sort, Collation and Skip behind Options. Enter or Ctrl/Cmd+Enter in any
- * field runs Find. `invalid` marks the field an error named.
+ * field runs Find. `invalid` marks the field an error named. The filter has the focus when the tab opens.
  */
 const draft = defineModel<QueryDraft>({ required: true });
 const pageSize = defineModel<number>('pageSize', { required: true });
@@ -34,6 +35,9 @@ const OPTION_FIELDS: { field: Exclude<QueryField, 'filter' | 'skip'>; label: str
 const optionsOpen = ref(false);
 const optionCount = computed(() => OPTION_FIELDS.filter((o) => draft.value[o.field].trim()).length + (draft.value.skip.trim() ? 1 : 0));
 const skipInvalid = computed(() => parseSkip(draft.value.skip) === null);
+const SKIP_PROBLEM = 'Skip is a whole number of documents, e.g. 100';
+const filterInput = ref<HTMLInputElement>();
+onMounted(() => filterInput.value?.focus());
 
 // An error in a field behind Options opens them, so the marked field can be seen.
 watch(
@@ -56,6 +60,7 @@ function onKey(event: KeyboardEvent): void {
       <label class="qfield filter" :class="{ invalid: invalid === 'filter' }">
         <span class="qlabel">Filter</span>
         <input
+          ref="filterInput"
           v-model="draft.filter"
           aria-label="Filter in shell syntax"
           placeholder='{ status: "paid" }'
@@ -73,11 +78,11 @@ function onKey(event: KeyboardEvent): void {
         <select v-model.number="pageSize" class="sel" aria-label="Documents per page">
           <option v-for="n in sizes" :key="n" :value="n">{{ n }} per page</option>
         </select>
-        <button type="button" class="btn sm btn-primary" :disabled="skipInvalid" :title="`Find (Enter or ${MOD_KEY}+Enter)`" @click="emit('find')">
+        <button type="button" class="btn sm btn-primary" :disabled="skipInvalid" :title="skipInvalid ? SKIP_PROBLEM : `Find (Enter or ${SUBMIT_KEY})`" @click="emit('find')">
           <Icon name="run" :size="12" filled /> Find
         </button>
         <button type="button" class="btn sm" title="Clear the query and find again" @click="emit('reset')">Reset</button>
-        <button type="button" class="btn sm" :disabled="skipInvalid" title="Show how the server runs this query" @click="emit('explain')">Explain</button>
+        <button type="button" class="btn sm" :disabled="skipInvalid" :title="skipInvalid ? SKIP_PROBLEM : 'Show how the server runs this query'" @click="emit('explain')">Explain</button>
       </div>
     </div>
     <div v-if="optionsOpen" class="line options-line">
@@ -95,7 +100,7 @@ function onKey(event: KeyboardEvent): void {
       </label>
       <label class="qfield skip" :class="{ invalid: invalid === 'skip' || skipInvalid }">
         <span class="qlabel">Skip</span>
-        <input v-model="draft.skip" aria-label="Documents to skip" placeholder="0" inputmode="numeric" autocomplete="off" @keydown="onKey" />
+        <input v-model="draft.skip" aria-label="Documents to skip" placeholder="0" inputmode="numeric" autocomplete="off" :title="skipInvalid ? SKIP_PROBLEM : undefined" @keydown="onKey" />
       </label>
     </div>
   </div>

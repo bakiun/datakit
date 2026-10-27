@@ -11,6 +11,7 @@ import {
   kafkaHealth,
   kafkaReleaseOfMetadataLevel,
   kafkaSecurityProtocol,
+  ksqlStatementWrites,
   messageContains,
   needsPassword,
   needsUser,
@@ -205,6 +206,16 @@ describe('Kafka topics', () => {
     expect(messageContains(message, 'alice')).toBe(true);
     expect(messageContains(message, 'abc')).toBe(true);
     expect(messageContains(message, 'nobody')).toBe(false);
+  });
+});
+
+describe('ksqlDB statements', () => {
+  it('tells reads from statements that change the server, past leading comments', () => {
+    expect(ksqlStatementWrites('SHOW STREAMS;')).toBe(false);
+    expect(ksqlStatementWrites('  select * from orders emit changes;')).toBe(false);
+    expect(ksqlStatementWrites('-- revenue\nSELECT * FROM revenue;')).toBe(false);
+    expect(ksqlStatementWrites('DROP STREAM orders;')).toBe(true);
+    expect(ksqlStatementWrites('CREATE STREAM s AS SELECT * FROM orders;')).toBe(true);
   });
 });
 

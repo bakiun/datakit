@@ -105,6 +105,7 @@ suite('Redis key browser', () => {
     assert.equal(started.fieldTtl, true);
     assert.equal(started.keepTtl, true);
     assert.equal(started.scanCount, 500);
+    assert.equal(started.lastScan, null);
     assert.match(started.serverLabel, /^Redis 8\.0/);
 
     const keys = await send({ type: 'scan', match: '*', keyType: null, cursor: '0', count: null, append: false }, 'keys');
@@ -112,6 +113,9 @@ suite('Redis key browser', () => {
     assert.deepEqual(keys.keys.map((k) => k.key).sort(), ['leaderboard', 'queue:emails', 'session:1', 'user:1']);
     const hashes = await send({ type: 'scan', match: 's*', keyType: 'hash', cursor: '0', count: 10, append: false }, 'keys');
     assert.deepEqual(hashes.keys, [{ key: 'session:1', type: 'hash', ttl: hashes.keys[0]!.ttl }]);
+    // The browser opens on the pattern and type used last time.
+    const reopened = await send({ type: 'ready' }, 'init');
+    assert.deepEqual(reopened.init.lastScan, { cursor: '0', match: 's*', type: 'hash', count: 10 });
 
     const opened = await send({ type: 'open', key: 'session:1' }, 'key');
     assert.equal(opened.detail.type, 'hash');
@@ -128,8 +132,9 @@ suite('Redis key browser', () => {
     const { page } = await reloaded;
     assert.ok(page.type === 'hash' && page.rows.some((r) => r.field === 'user' && r.value === '2'));
 
+    // A list element that changed since it was loaded is not overwritten; the page reads the list again.
     const list = await send({ type: 'edit', edit: { kind: 'listSet', key: 'queue:emails', index: 0, value: 'z', expected: 'stale' } }, 'written', 'writeFailed');
-    assert.deepEqual(list, { type: 'writeFailed', message: 'The list changed since it was loaded; reload it.' });
+    assert.deepEqual(list, { type: 'writeFailed', message: 'The list changed since it was loaded, so nothing was written.', reason: 'stale' });
 
     const renamed = await send({ type: 'edit', edit: { kind: 'renameKey', key: 'user:1', to: 'user:42' } }, 'written');
     assert.equal(renamed.key, 'user:42');
@@ -139,7 +144,7 @@ suite('Redis key browser', () => {
     const declined = await stubbing('showWarningMessage', undefined, () =>
       send({ type: 'edit', edit: { kind: 'deleteKeys', keys: ['leaderboard'] } }, 'written', 'writeFailed'),
     );
-    assert.deepEqual(declined, { type: 'writeFailed', message: 'Nothing was written.' });
+    assert.deepEqual(declined, { type: 'writeFailed', message: 'Nothing was written.', reason: 'cancelled' });
     const deleted = await stubbing('showWarningMessage', 'Delete', () => send({ type: 'edit', edit: { kind: 'deleteKeys', keys: ['leaderboard'] } }, 'written'));
     assert.equal(deleted.key, null);
     assert.equal((await send({ type: 'open', key: 'leaderboard' }, 'keyGone', 'key')).type, 'keyGone');
@@ -185,5 +190,30 @@ suite('Redis key browser', () => {
       { index: 1, value: 'b' },
       { index: 2, value: 'c' },
     ]);
+  });
+
+  test('Browse Keys on a data source connects and opens the database it is set to', async () => {
+    const other = (await api.store.save(null, redisSettings({ name: 'sessions', database: '3' }), { password: 'datakit' })).id;
+    const node = api.tree.nodeFor(other);
+    assert.equal(api.tree.getTreeItem(node).contextValue, 'dataSource.disconnected.redis');
+    const init = new Promise<Reply<'init'>>((resolve) => {
+      const listener = api.onDidPostRedis(({ dataSourceId, message }) => {
+        if (dataSourceId !== other || message.type !== 'init') return;
+        listener.dispose();
+        resolve(message);
+      });
+    });
+    await vscode.commands.executeCommand('datakit.openRedisKeys', node);
+    assert.equal(api.sessions.status(other), 'connected');
+    const { init: started } = await init;
+    assert.equal(started.dataSourceName, 'sessions');
+    assert.equal(started.database, 3);
+
+    // Run again, it brings the open key browser to the front instead of opening another, and does not connect.
+    await api.sessions.disconnect(other);
+    await vscode.commands.executeCommand('datakit.openRedisKeys', node);
+    assert.equal(api.sessions.status(other), 'idle');
+    const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.label === 'sessions · db3');
+    assert.equal(tabs.length, 1);
   });
 });

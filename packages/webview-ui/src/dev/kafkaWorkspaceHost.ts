@@ -22,6 +22,7 @@ import {
   type KafkaTopicSummary,
   type KafkaWorkspaceHostMessage,
   type KafkaWorkspaceInit,
+  type KafkaWorkspacePrefs,
   type KafkaWorkspaceWebviewMessage,
   type KafkaWrite,
   type SchemaCompatibility,
@@ -32,7 +33,8 @@ import {
 /**
  * Plays the extension for the Kafka workspace on the dev server, with a cluster modelled on the design in memory.
  * Messages are generated from their offset, so any page or range can be read; writes change the model.
- * Query: `&readonly`, `&noservices` (no Schema Registry, Connect or ksqlDB), `&production`, `&noauthorizer` (ACLs
+ * Query: `&readonly`, `&noservices` (no Schema Registry, Connect or ksqlDB), `&production` (with `&cancel`, every
+ * write is declined in the Production confirmation), `&noauthorizer` (ACLs
  * not enforced), `&initfail`, `&section=topics&topic=orders.created` to open somewhere else.
  * A ksqlDB statement containing `fail` fails; a schema containing `INCOMPATIBLE` is refused as incompatible.
  */
@@ -420,6 +422,7 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
   addGroup('order-service', 'Stable', 2, { 'orders.created': [2, 0, 5, 0, 3, 2], 'orders.status-changed': [0, 0, 1, 0, 0, 0] });
   addGroup('analytics-sink', 'Stable', 2, { 'orders.created': [0, 0, 0, 0, 0, 0], 'payments.captured': [0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0] });
   addGroup('notifier', 'Empty', 0, { 'emails.outbox': [23, 18] });
+  addGroup('audit-replay', 'Empty', 0, { 'orders.created': [12, 0, 4, 0, 0, 3], 'payments.captured': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] });
   addGroup('inventory-worker', 'PreparingRebalance', 1, { 'inventory.adjusted': [1, 0, 2] });
 
   function groupOffsets(g: Group): KafkaGroupDetail['offsets'] {
@@ -564,6 +567,15 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
   const connectorList = (): Connector[] => [...connectors.values()].map(({ config: _config, ...c }) => c);
 
   let favourites = ['orders.created', 'payments.captured'];
+  /** Remembered choices; kept in sessionStorage so a reload of the dev page shows them coming back. */
+  const prefsKey = 'datakit.dev.kafkaPrefs';
+  const readPrefs = (): KafkaWorkspacePrefs => {
+    try {
+      return JSON.parse(sessionStorage.getItem(prefsKey) ?? '{}') as KafkaWorkspacePrefs;
+    } catch {
+      return {};
+    }
+  };
 
   // ---------- reads ----------
 
@@ -970,9 +982,12 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
           case 'delete':
             connectors.delete(w.name);
             return `Deleted ${w.name}.`;
-          case 'resetOffsets':
-            if (c.state !== 'STOPPED') throw new Error(`Connector ${w.name} must be STOPPED to reset its offsets.`);
-            return `Reset the offsets of ${w.name}.`;
+          case 'resetOffsets': {
+            // As the extension does: a connector that is not stopped is stopped first.
+            const wasStopped = c.state === 'STOPPED';
+            setAll('STOPPED');
+            return wasStopped ? `Reset the offsets of ${w.name}.` : `Stopped ${w.name} and reset its offsets. Resume it to start over.`;
+          }
         }
         break;
       }
@@ -1031,6 +1046,7 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
     connectUrl: services ? 'http://connect.internal:8083' : null,
     ksqlDbUrl: services ? 'http://ksqldb.internal:8088' : null,
     favourites,
+    prefs: readPrefs(),
     section: (params.get('section') as KafkaWorkspaceInit['section'] | null) ?? 'overview',
     topic: params.get('topic'),
   });
@@ -1142,6 +1158,11 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
         if (ksqlRun?.runId === message.runId) stopKsql();
         break;
       case 'write':
+        // `&cancel` plays declining the Production confirmation.
+        if (production && params.has('cancel')) {
+          reply({ type: 'failed', kind: message.write.kind, message: 'Nothing was changed.', cancelled: true }, 300);
+          break;
+        }
         try {
           const done = apply(message.write);
           if (production) console.info('[dev host] production: the extension asks in a VS Code modal before', message.write.kind);
@@ -1160,6 +1181,12 @@ export function installKafkaWorkspaceHost(reply: Reply): (message: KafkaWorkspac
         reply({ type: 'notice', message: `Dumped ${(t ? count(t) : 0).toLocaleString('en-US')} messages of ${message.topic} to /Users/dev/${message.topic}.jsonl, oldest first.` }, 500);
         break;
       }
+      case 'prefs':
+        sessionStorage.setItem(prefsKey, JSON.stringify({ ...readPrefs(), ...message.prefs }));
+        break;
+      case 'editDataSource':
+        console.info('[dev host] the extension opens the data source editor');
+        break;
       case 'copy':
         console.info('[dev host] copy\n' + message.text);
         void navigator.clipboard?.writeText(message.text).catch(() => undefined);

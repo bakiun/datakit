@@ -29,8 +29,12 @@ const props = defineProps<{
   tables: string[];
   applying: boolean;
   error: string | null;
+  /** The uncommitted writes of the view's open transaction; null when none is open. Apply waits until it ends. */
+  openTransaction: number | null;
+  /** Why the open transaction cannot be ended from here now; null when it can. */
+  endBlocked: string | null;
 }>();
-const emit = defineEmits<{ apply: [statements: string[]]; viewDdl: []; copy: [sql: string] }>();
+const emit = defineEmits<{ apply: [statements: string[]]; viewDdl: []; copy: [sql: string]; endTransaction: [type: 'commit' | 'rollback'] }>();
 
 const MYSQL_COLUMN_TYPES = [
   'int',
@@ -102,6 +106,13 @@ const errors = computed(() => validateDraft(props.structure, draft.value));
 const firstError = computed(() => Object.values(errors.value)[0] ?? null);
 const changes = computed(() => countDraftChanges(props.structure, draft.value));
 const statements = computed(() => (firstError.value ? [] : buildAlterTable(props.structure, draft.value)));
+/** DDL commits an open transaction on MySQL; on PostgreSQL the change set needs a transaction of its own. */
+const transactionNote = computed(() => {
+  const n = props.openTransaction;
+  if (n === null) return null;
+  const why = postgres.value ? 'the changes run in a transaction of their own' : 'ALTER TABLE would commit it';
+  return `A transaction with ${n} uncommitted change${n === 1 ? '' : 's'} is open; ${why}. Commit or roll it back to apply.`;
+});
 const preview = computed(() => statements.value.map((s) => `${s};`).join('\n\n'));
 const keptColumns = computed(() => draft.value.columns.filter((c) => !c.dropped).map((c) => c.name));
 
@@ -315,7 +326,7 @@ function revert(): void {
                 aria-label="Default"
                 spellcheck="false"
               />
-              <RevertDot v-if="colChanged(column, 'defaultSql')" label="Revert defaultSql" title="Revert to the table's value" @click="revertColumn(column, 'defaultSql')" />
+              <RevertDot v-if="colChanged(column, 'defaultSql')" label="Revert default" title="Revert to the table's value" @click="revertColumn(column, 'defaultSql')" />
             </td>
             <td class="key">{{ info(column)?.key ?? '' }}</td>
             <td class="extra" :class="{ changed: colChanged(column, 'autoIncrement') }">
@@ -323,7 +334,7 @@ function revert(): void {
                 <input v-model="column.autoIncrement" type="checkbox" :disabled="!editable || column.dropped" />{{ postgres ? 'identity' : 'auto_increment' }}
               </label>
               <span v-if="extraText(column)">{{ extraText(column) }}</span>
-              <RevertDot v-if="colChanged(column, 'autoIncrement')" label="Revert autoIncrement" title="Revert to the table's value" @click="revertColumn(column, 'autoIncrement')" />
+              <RevertDot v-if="colChanged(column, 'autoIncrement')" :label="postgres ? 'Revert identity' : 'Revert auto_increment'" title="Revert to the table's value" @click="revertColumn(column, 'autoIncrement')" />
             </td>
             <td :class="{ changed: colChanged(column, 'comment') }">
               <input v-model="column.comment" class="cell-input comment" :disabled="!editable || column.dropped" aria-label="Comment" />
@@ -465,7 +476,7 @@ function revert(): void {
                 aria-label="Referenced table"
                 spellcheck="false"
               />
-              <RevertDot v-if="fkChanged(fk, 'refTable')" label="Revert refTable" title="Revert to the table's value" @click="revertForeignKey(fk, 'refTable')" />
+              <RevertDot v-if="fkChanged(fk, 'refTable')" label="Revert referenced table" title="Revert to the table's value" @click="revertForeignKey(fk, 'refTable')" />
             </td>
             <td :class="{ changed: fkChanged(fk, 'refColumns') }">
               <input
@@ -478,19 +489,19 @@ function revert(): void {
                 aria-label="Referenced columns"
                 spellcheck="false"
               />
-              <RevertDot v-if="fkChanged(fk, 'refColumns')" label="Revert refColumns" title="Revert to the table's value" @click="revertForeignKey(fk, 'refColumns')" />
+              <RevertDot v-if="fkChanged(fk, 'refColumns')" label="Revert referenced columns" title="Revert to the table's value" @click="revertForeignKey(fk, 'refColumns')" />
             </td>
             <td :class="{ changed: fkChanged(fk, 'onUpdate') }">
               <select v-model="fk.onUpdate" class="cell-input" :disabled="!editable || fk.dropped" aria-label="On update">
                 <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
               </select>
-              <RevertDot v-if="fkChanged(fk, 'onUpdate')" label="Revert onUpdate" title="Revert to the table's value" @click="revertForeignKey(fk, 'onUpdate')" />
+              <RevertDot v-if="fkChanged(fk, 'onUpdate')" label="Revert on update" title="Revert to the table's value" @click="revertForeignKey(fk, 'onUpdate')" />
             </td>
             <td :class="{ changed: fkChanged(fk, 'onDelete') }">
               <select v-model="fk.onDelete" class="cell-input" :disabled="!editable || fk.dropped" aria-label="On delete">
                 <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
               </select>
-              <RevertDot v-if="fkChanged(fk, 'onDelete')" label="Revert onDelete" title="Revert to the table's value" @click="revertForeignKey(fk, 'onDelete')" />
+              <RevertDot v-if="fkChanged(fk, 'onDelete')" label="Revert on delete" title="Revert to the table's value" @click="revertForeignKey(fk, 'onDelete')" />
             </td>
             <td v-if="editable" class="narrow">
               <IconButton
@@ -511,10 +522,22 @@ function revert(): void {
         <div class="buttons">
           <IconButton v-if="preview" icon="copy" label="Copy SQL" @click="emit('copy', preview)" />
           <button type="button" class="btn" :disabled="applying" @click="revert">Revert</button>
-          <button type="button" class="btn btn-primary" :disabled="applying || !!firstError || !statements.length" @click="emit('apply', statements)">
+          <button
+            type="button"
+            class="btn btn-primary"
+            :title="transactionNote ?? undefined"
+            :disabled="applying || !!firstError || !statements.length || openTransaction !== null"
+            @click="emit('apply', statements)"
+          >
             {{ applying ? 'Applying…' : 'Apply' }}
           </button>
         </div>
+      </div>
+      <div v-if="transactionNote && statements.length" class="transaction" role="status">
+        <Icon name="info" :size="14" />
+        <span>{{ transactionNote }}</span>
+        <button type="button" class="btn" :disabled="!!endBlocked" :title="endBlocked ?? undefined" @click="emit('endTransaction', 'commit')">Commit</button>
+        <button type="button" class="btn" :disabled="!!endBlocked" :title="endBlocked ?? undefined" @click="emit('endTransaction', 'rollback')">Roll back</button>
       </div>
       <p v-if="firstError" class="problem" role="alert"><Icon name="error" :size="14" />{{ firstError }}</p>
       <p v-else-if="error" class="problem" role="alert"><Icon name="error" :size="14" />{{ error }}</p>
@@ -676,6 +699,18 @@ td.changed {
   padding: 10px 12px 12px;
   border-top: 1px solid var(--vscode-panel-border);
   background: var(--vscode-editor-background);
+}
+.transaction {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--vscode-editorWarning-foreground);
+}
+.transaction span {
+  color: var(--vscode-foreground);
 }
 .problem {
   display: flex;

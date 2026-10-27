@@ -8,9 +8,13 @@ import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutt
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { SqlDialect } from '@datakit/core';
 import { codeHighlight as highlight, codeTheme as theme } from '../components/codeTheme';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import { GRAMMARS } from './scriptClauses';
 
-/** The SQL script editor (CodeMirror) with MySQL, MariaDB or PostgreSQL highlighting and completion. Ctrl/Cmd+Enter runs. */
+/**
+ * The SQL script editor (CodeMirror) with MySQL, MariaDB or PostgreSQL highlighting and completion. Ctrl+Enter runs,
+ * and ⌘Enter too on macOS.
+ */
 const props = defineProps<{ dialect: SqlDialect; schema: Record<string, string[]>; defaultTable: string }>();
 const model = defineModel<string>({ required: true });
 const emit = defineEmits<{ run: [] }>();
@@ -41,11 +45,13 @@ onMounted(() => {
         language.of(sqlLanguage()),
         syntaxHighlighting(highlight),
         theme,
-        placeholder('Write SQL here — Ctrl+Enter runs it, or the selection'),
+        placeholder(`Write SQL here — ${SUBMIT_KEY} runs it, or the selection`),
         EditorView.cspNonce.of(document.body.dataset.nonce ?? ''),
         EditorView.contentAttributes.of({ 'aria-label': 'SQL script' }),
         keymap.of([
           { key: 'Mod-Enter', run: () => (emit('run'), true) },
+          // Labels say Ctrl+Enter off macOS; on macOS it works as well as ⌘Enter.
+          { key: 'Ctrl-Enter', run: () => (emit('run'), true) },
           ...closeBracketsKeymap,
           ...defaultKeymap,
           ...historyKeymap,

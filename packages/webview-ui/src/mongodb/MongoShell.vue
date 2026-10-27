@@ -10,14 +10,13 @@ import ShellText from './ShellText.vue';
  * A mongosh-style prompt under the tabs: `<database>>`, ↑ and ↓ walk through earlier lines, answers print below
  * the line, errors in the error color. The bar folds it away; the page sizes it with a handle above it.
  */
-const props = defineProps<{ entries: ShellEntry[]; busy: boolean; database: string; collection: string }>();
+const props = defineProps<{ entries: ShellEntry[]; busy: boolean; running: string; database: string; collection: string }>();
 const open = defineModel<boolean>('open', { required: true });
 const emit = defineEmits<{ run: [line: string]; clear: [] }>();
 
 /** Longer answers are cut so the log stays small; Copy in the shell is the way to more. */
 const MAX_OUTPUT = 20_000;
 const line = ref('');
-const sent = ref('');
 const history: string[] = [];
 let back = -1;
 const log = ref<HTMLElement>();
@@ -37,7 +36,6 @@ function onKey(event: KeyboardEvent): void {
   if (event.key === 'Enter' && line.value.trim() && !props.busy) {
     if (history[0] !== line.value) history.unshift(line.value);
     back = -1;
-    sent.value = line.value;
     emit('run', line.value);
     line.value = '';
   } else if (event.key === 'ArrowUp' && history.length) {
@@ -81,7 +79,7 @@ const cut = (text: string) => (text.length > MAX_OUTPUT ? `${text.slice(0, MAX_O
           <pre v-else-if="e.output" class="output error">{{ cut(e.output) }}</pre>
         </div>
         <div v-if="busy" class="entry">
-          <div class="echo"><span class="prompt">{{ database }}&gt;</span> {{ sent }}</div>
+          <div class="echo"><span><span class="prompt">{{ database }}&gt;</span> {{ running }}</span></div>
         </div>
       </div>
       <label class="input mono">

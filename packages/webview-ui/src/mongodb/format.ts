@@ -49,9 +49,6 @@ export function percent(part: number, whole: number): string {
   return `${Math.round(p)}%`;
 }
 
-/** The shortcut modifier as the platform names it. */
-export const MOD_KEY = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? 'Cmd' : 'Ctrl';
-
 /** Documents per page the select offers. */
 export const PAGE_SIZES: readonly number[] = [20, 50, 100, 500];
 

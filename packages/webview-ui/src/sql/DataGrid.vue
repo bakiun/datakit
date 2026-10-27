@@ -16,6 +16,8 @@ const props = defineProps<{
   changes: TableChanges;
   editable: boolean;
   sortable: boolean;
+  /** Why the headers do not sort, for their tooltip; null or left out says nothing, e.g. while a query runs. */
+  unsortable?: string | null;
 }>();
 const selected = defineModel<Set<RowId>>('selected', { required: true });
 const emit = defineEmits<{ sort: [column: string, additive: boolean] }>();
@@ -63,8 +65,8 @@ function headTitle(column: ResultColumn): string {
   if (info?.defaultValue != null) details.push(`default ${info.defaultValue}`);
   if (info?.extra) details.push(info.extra);
   if (info && info.name !== column.name) details.push(`column ${info.name}`);
-  const hint = props.sortable ? 'Click to sort, Shift+click to add' : 'Sorting is off while there are changes or the query cannot be paged';
-  return `${details.join(' · ')}\n${hint}`;
+  const hint = props.sortable ? 'Click to sort, Shift+click to add' : props.unsortable ? `Sorting is off: ${props.unsortable}` : '';
+  return hint ? `${details.join(' · ')}\n${hint}` : details.join(' · ');
 }
 
 function canEdit(id: RowId, column: ResultColumn): boolean {
@@ -163,6 +165,7 @@ function choices(id: RowId, column: ResultColumn): { value: string; label: strin
             >
           </button>
         </th>
+        <th class="filler" aria-hidden="true" />
       </tr>
     </thead>
     <tbody>
@@ -221,9 +224,10 @@ function choices(id: RowId, column: ResultColumn): { value: string; label: strin
             @click="changes.revertCell(id, column.name)"
           />
         </td>
+        <td class="filler" />
       </tr>
       <tr v-if="!rowIds.length">
-        <td class="empty" :colspan="columns.length + 1">No rows</td>
+        <td class="empty" :colspan="columns.length + 2">{{ editable ? 'No rows. Add one with + in the toolbar.' : 'No rows' }}</td>
       </tr>
     </tbody>
   </table>
@@ -255,6 +259,11 @@ th {
 .check {
   width: 36px;
   padding: 0 10px;
+}
+/* Takes the width the columns leave, so each column keeps the width of its content. */
+.filler {
+  width: 100%;
+  border-right: 0;
 }
 .head {
   display: flex;

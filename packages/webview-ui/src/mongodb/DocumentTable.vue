@@ -8,8 +8,8 @@ import { columnType, documentKey, isScalar, typeTextColor } from './format';
 
 /**
  * The page as a table: `_id`, then every top-level field of the page's documents. A click picks the row (the page
- * opens it in the document pane); a double-click on a whole scalar value edits it in place, Enter writes it with
- * `$set` and Escape cancels. Objects, arrays and cut values open the document pane instead.
+ * opens it in the document pane); a double-click on a whole scalar value edits it in place, Enter or leaving the
+ * cell writes it with `$set` and Escape cancels. Objects, arrays and cut values open the document pane instead.
  */
 const props = defineProps<{ documents: MongoDocument[]; picked: string | null; canWrite: boolean }>();
 const emit = defineEmits<{ pick: [document: MongoDocument, key: string]; open: [document: MongoDocument, key: string] }>();
@@ -151,7 +151,7 @@ function cellTitle(f: MongoFieldPreview | undefined, r: Row, field: string): str
               spellcheck="false"
               @click.stop
               @keydown="onKey($event, r)"
-              @blur="editing = null"
+              @blur="commit(r)"
             />
             <template v-else>
               <button

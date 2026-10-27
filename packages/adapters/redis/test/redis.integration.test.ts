@@ -1,4 +1,4 @@
-import { createDataSourceSettings, planEdit, type DataSourceSettings, type RedisEdit } from '@datakit/core';
+import { createDataSourceSettings, LIST_CHANGED, planEdit, RedisCheckError, type DataSourceSettings, type RedisEdit } from '@datakit/core';
 import { RedisContainer, type StartedRedisContainer } from '@testcontainers/redis';
 import { GenericContainer, Network, type StartedNetwork, type StartedTestContainer } from 'testcontainers';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -127,13 +127,18 @@ describe.each([
   it('deletes list elements by position and refuses when the list changed', async () => {
     await edit({ kind: 'listDelete', key: 'queue', items: [{ index: 1, expected: 'b' }] });
     expect(await session.command(['LRANGE', 'queue', '0', '-1'])).toEqual({ kind: 'array', items: ['a', 'c', 'b'].map((value) => ({ kind: 'bulk', value })) });
-    await expect(edit({ kind: 'listSet', key: 'queue', index: 0, value: 'z', expected: 'not-a' })).rejects.toThrow('The list changed since it was loaded; reload it.');
+    const stale = edit({ kind: 'listSet', key: 'queue', index: 0, value: 'z', expected: 'not-a' });
+    await expect(stale).rejects.toThrow(LIST_CHANGED);
+    await expect(stale).rejects.toBeInstanceOf(RedisCheckError);
   });
 
   it('renames fields, members and keys without overwriting', async () => {
     await edit({ kind: 'hashRenameField', key: 'session:1', from: 'user', to: 'user_id', value: '1' });
     expect(await session.command(['HGET', 'session:1', 'user_id'])).toEqual({ kind: 'bulk', value: '1' });
     await expect(edit({ kind: 'hashRenameField', key: 'session:1', from: 'user_id', to: 'cart', value: '1' })).rejects.toThrow('already has a field “cart”');
+    // A field whose value changed since it was loaded is not renamed with the old value.
+    await expect(edit({ kind: 'hashRenameField', key: 'session:1', from: 'user_id', to: 'uid', value: 'stale' })).rejects.toThrow('changed since it was loaded');
+    expect(await session.command(['HGET', 'session:1', 'user_id'])).toEqual({ kind: 'bulk', value: '1' });
     await edit({ kind: 'zsetRename', key: 'board', from: 'm1', to: 'm9', score: '1.5' });
     expect(await session.command(['ZSCORE', 'board', 'm9'])).toEqual({ kind: 'bulk', value: '1.5' });
     await expect(edit({ kind: 'renameKey', key: 'flags', to: 'queue' })).rejects.toThrow('A key named “queue” already exists.');

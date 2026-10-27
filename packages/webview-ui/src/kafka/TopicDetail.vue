@@ -52,10 +52,15 @@ function reproduce(message: KafkaMessage): void {
   produceOpen.value = true;
 }
 
-/** The Produce button opens an empty form; Edit & re-produce fills it. */
+/** The Produce button opens the form as it was left (or a new one); Edit & re-produce fills it. */
 function toggleProduce(): void {
   prefill.value = null;
   produceOpen.value = !produceOpen.value;
+}
+
+function openProduce(): void {
+  prefill.value = null;
+  produceOpen.value = true;
 }
 
 const stop = onHostMessage<KafkaWorkspaceHostMessage>((message) => {
@@ -85,7 +90,7 @@ onUnmounted(stop);
     <p v-else-if="!detail" class="empty-state pad">Opening the topic…</p>
     <div v-else class="body">
       <div class="main">
-        <MessageBrowser v-show="tab === 'messages'" :topic="detail" @reproduce="reproduce" @sample="sample = $event" />
+        <MessageBrowser v-show="tab === 'messages'" :topic="detail" @reproduce="reproduce" @sample="sample = $event" @produce="openProduce" />
         <TopicSettings v-if="tab === 'settings'" :detail="detail" />
         <TopicConsumers v-if="tab === 'consumers'" :topic="name" />
       </div>

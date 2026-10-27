@@ -212,6 +212,33 @@ export function needsUser(settings: DataSourceSettings): boolean {
   return settings.auth === 'password';
 }
 
+/** The host part of `host:port` or `[ipv6]:port`. */
+function hostOf(address: string): string {
+  const bracketed = /^\[([^\]]+)\]/.exec(address);
+  return bracketed ? bracketed[1]! : (address.split(':')[0] ?? '');
+}
+
+/**
+ * The name a data source gets when the user leaves Name empty: `database@host`, or the host alone, made unique
+ * against `otherNames` with a number (`localhost 2`).
+ */
+export function suggestDataSourceName(settings: DataSourceSettings, otherNames: readonly string[]): string {
+  const host =
+    settings.engine === 'kafka'
+      ? hostOf(bootstrapServerList(settings.kafka)[0] ?? '')
+      : settings.engine === 'mongodb'
+        ? hostOf(mongoHostList(settings.mongo)[0] ?? '')
+        : settings.engine === 'mysql' && settings.connectionType === 'socket'
+          ? 'localhost'
+          : settings.host.trim();
+  const database = settings.engine === 'redis' || settings.engine === 'kafka' ? '' : settings.database.trim();
+  const base = host ? (database ? `${database}@${host}` : host) : getEngine(settings.engine).name;
+  const taken = new Set(otherNames.map((n) => n.trim().toLowerCase()));
+  let name = base;
+  for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${base} ${i}`;
+  return name;
+}
+
 /** A new form for another engine that keeps what the user already typed above the tabs. */
 export function switchEngine(settings: DataSourceSettings, engine: EngineId): DataSourceSettings {
   return { ...createDataSourceSettings(engine), name: settings.name, comment: settings.comment, environment: settings.environment };

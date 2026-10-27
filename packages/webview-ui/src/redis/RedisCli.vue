@@ -10,13 +10,18 @@ export interface CliEntry {
   durationMs: number | null;
 }
 
-/** A redis-cli style prompt under the browser; ↑ and ↓ walk through earlier lines. */
+/**
+ * A redis-cli style prompt under the browser; ↑ and ↓ walk through earlier lines and back to what was being typed.
+ * The prompt keeps the focus while a command runs, so the next one can be typed; Enter waits for the reply.
+ */
 const props = defineProps<{ prompt: string; entries: CliEntry[]; busy: boolean }>();
 const emit = defineEmits<{ run: [line: string] }>();
 
 const line = ref('');
 const history: string[] = [];
 let back = -1;
+/** What was typed before ↑ was pressed. */
+let typed = '';
 const log = ref<HTMLElement>();
 
 watch(
@@ -25,18 +30,19 @@ watch(
 );
 
 function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Enter' && line.value.trim()) {
-    history.unshift(line.value);
+  if (event.key === 'Enter' && line.value.trim() && !props.busy) {
+    if (history[0] !== line.value) history.unshift(line.value);
     back = -1;
     emit('run', line.value);
     line.value = '';
   } else if (event.key === 'ArrowUp' && history.length) {
+    if (back < 0) typed = line.value;
     back = Math.min(back + 1, history.length - 1);
     line.value = history[back]!;
     event.preventDefault();
-  } else if (event.key === 'ArrowDown') {
-    back = Math.max(back - 1, -1);
-    line.value = back < 0 ? '' : history[back]!;
+  } else if (event.key === 'ArrowDown' && back >= 0) {
+    back--;
+    line.value = back < 0 ? typed : history[back]!;
     event.preventDefault();
   }
 }
@@ -52,7 +58,7 @@ function onKey(event: KeyboardEvent): void {
     </div>
     <label class="input">
       <span class="prompt">{{ prompt }}&gt;</span>
-      <input v-model="line" :disabled="busy" placeholder="Type a command, e.g. TTL key" spellcheck="false" autocomplete="off" aria-label="Redis command" @keydown="onKey" />
+      <input v-model="line" :aria-busy="busy" placeholder="Type a command, e.g. TTL key" spellcheck="false" autocomplete="off" aria-label="Redis command" @keydown="onKey" />
     </label>
   </section>
 </template>

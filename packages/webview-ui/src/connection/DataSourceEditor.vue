@@ -6,8 +6,10 @@ import {
   ENVIRONMENTS,
   needsPassword,
   sectionOf,
+  suggestDataSourceName,
   switchEngine,
   validateDataSource,
+  type DataSourceSettings,
   type EditorHostMessage,
   type EditorState,
   type EditorWebviewMessage,
@@ -17,9 +19,10 @@ import {
   type SecretKey,
   type SecretPatch,
 } from '@datakit/core';
-import { computed, onMounted, onUnmounted, provide, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref } from 'vue';
 import FormRow from '../components/FormRow.vue';
 import Icon from '../components/Icon.vue';
+import { isSubmitShortcut, SUBMIT_KEY } from '../components/shortcuts';
 import { onHostMessage, postToHost } from '../host';
 import AdvancedSection from './AdvancedSection.vue';
 import { assignSettings, formKey } from './form';
@@ -39,13 +42,6 @@ const SECTIONS: readonly { id: FormSection; label: string }[] = [
 ];
 /** Kafka has no SSH tunnel; its second tab holds TLS. */
 const sectionLabel = (id: FormSection, label: string) => (id === 'ssh' && settings.engine === 'kafka' ? 'SSL / SASL' : label);
-const NAME_PLACEHOLDERS: Record<EngineId, string> = {
-  mysql: 'e.g. shop-staging',
-  postgres: 'e.g. billing-staging',
-  redis: 'e.g. cache-staging',
-  kafka: 'e.g. events-staging',
-  mongodb: 'e.g. catalog-staging',
-};
 const SECRET_KEYS: readonly SecretKey[] = ['password', 'sshPassword', 'sshPassphrase'];
 
 const loaded = ref(false);
@@ -60,10 +56,17 @@ const showErrors = ref(false);
 const busy = ref<'test' | 'save' | null>(null);
 const status = ref<{ ok: boolean; message: string } | null>(null);
 
-const errors = computed(() => validateDataSource(settings, otherNames.value));
+const nameInput = ref<HTMLInputElement | null>(null);
+/** The name used when Name is left empty; the field shows it as its placeholder. */
+const suggestedName = computed(() => suggestDataSourceName(settings, otherNames.value));
+/** The settings as they are saved: an empty name becomes the suggested one. */
+const named = (): DataSourceSettings => ({ ...settings, name: settings.name.trim() ? settings.name : suggestedName.value });
+
+const errors = computed(() => validateDataSource(named(), otherNames.value));
 const error = (field: string) => (showErrors.value ? errors.value[field] : undefined);
 const sectionsWithErrors = computed(() => new Set(showErrors.value ? Object.keys(errors.value).map(sectionOf) : []));
 const isEdit = computed(() => mode.value === 'edit');
+const primaryLabel = computed(() => (isEdit.value ? 'Save' : 'Save & connect'));
 
 const post = (message: EditorWebviewMessage) => postToHost(message);
 
@@ -113,6 +116,15 @@ function secretPatch(): SecretPatch {
 }
 
 function test(): void {
+  // The name does not matter for a test; a connection field that needs fixing is shown and focused at once.
+  const field = Object.keys(errors.value).find((f) => f !== 'name');
+  if (field) {
+    showErrors.value = true;
+    section.value = sectionOf(field) ?? section.value;
+    status.value = { ok: false, message: errors.value[field]! };
+    void focusFirstInvalid(false);
+    return;
+  }
   busy.value = 'test';
   status.value = null;
   post({ type: 'test', settings: cloneSettings(settings), secrets: secretPatch() });
@@ -124,11 +136,32 @@ function save(close: boolean): void {
   if (field) {
     section.value = sectionOf(field) ?? section.value;
     status.value = { ok: false, message: errors.value[field]! };
+    void focusFirstInvalid();
     return;
   }
   busy.value = 'save';
   status.value = null;
-  post({ type: 'save', settings: cloneSettings(settings), secrets: secretPatch(), close });
+  post({ type: 'save', settings: cloneSettings(named()), secrets: secretPatch(), close });
+}
+
+/** Puts the cursor in the first field that needs fixing, once its tab is shown; a test skips the name. */
+async function focusFirstInvalid(withName = true): Promise<void> {
+  await nextTick();
+  document.querySelector<HTMLElement>(withName ? '.editor .invalid' : '.editor .invalid:not(#c-name)')?.focus();
+}
+
+const NO_SUBMIT_TYPES = new Set(['checkbox', 'radio', 'button', 'file']);
+
+/** Enter in a text field saves, like the primary button; ⌘Enter (Ctrl+Enter off macOS) saves from anywhere. */
+function submitOnEnter(event: KeyboardEvent): void {
+  if (busy.value !== null) return;
+  if (!isSubmitShortcut(event)) {
+    if (event.key !== 'Enter' || event.isComposing || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || NO_SUBMIT_TYPES.has(target.type) || target.list) return;
+  }
+  event.preventDefault();
+  save(true);
 }
 
 /** A new data source can change its engine; the fields start again from that engine's defaults. */
@@ -149,6 +182,7 @@ const stop = onHostMessage<EditorHostMessage>((message) => {
   switch (message.type) {
     case 'init':
       load(message.state);
+      void nextTick(() => nameInput.value?.focus());
       break;
     case 'testResult':
       busy.value = null;
@@ -174,7 +208,7 @@ onUnmounted(stop);
 </script>
 
 <template>
-  <main v-if="loaded" class="editor" @input="edited" @change="edited">
+  <main v-if="loaded" class="editor" @input="edited" @change="edited" @keydown="submitOnEnter">
     <h1>{{ isEdit ? 'Edit data source' : 'New data source' }}</h1>
 
     <div role="tablist" aria-label="Engine" class="engines">
@@ -186,6 +220,7 @@ onUnmounted(stop);
         class="engine"
         :aria-selected="settings.engine === engine.id"
         :disabled="isEdit && settings.engine !== engine.id"
+        :title="isEdit && settings.engine !== engine.id ? 'A saved data source keeps its engine' : undefined"
         @click="pickEngine(engine.id)"
       >
         <Icon :name="engine.id" :size="18" class="engine-icon" />
@@ -197,12 +232,13 @@ onUnmounted(stop);
       <FormRow label="Name" for="c-name">
         <input
           id="c-name"
+          ref="nameInput"
           v-model="settings.name"
           class="fld grow"
           :class="{ invalid: error('name') }"
-          :placeholder="NAME_PLACEHOLDERS[settings.engine]"
+          :placeholder="suggestedName"
+          :title="settings.name.trim() ? undefined : `Left empty, the data source is named ${suggestedName}`"
           spellcheck="false"
-          autofocus
         />
       </FormRow>
       <FormRow label="Comment" for="c-comment">
@@ -252,8 +288,8 @@ onUnmounted(stop);
       <div class="buttons">
         <button type="button" class="btn" :disabled="busy === 'save'" @click="post({ type: 'cancel' })">Cancel</button>
         <button v-if="isEdit" type="button" class="btn" :disabled="busy !== null" @click="save(false)">Apply</button>
-        <button type="button" class="btn btn-primary" :disabled="busy !== null" @click="save(true)">
-          {{ isEdit ? 'Save' : 'Save & connect' }}
+        <button type="button" class="btn btn-primary" :disabled="busy !== null" :title="`${primaryLabel} (${SUBMIT_KEY})`" @click="save(true)">
+          {{ primaryLabel }}
         </button>
       </div>
     </footer>

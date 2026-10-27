@@ -7,11 +7,14 @@ const open: symbol[] = [];
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { isSubmitShortcut, SUBMIT_KEY } from '../components/shortcuts';
 import type { WriteResult } from './workspace';
 
 /**
  * A modal dialog with Cancel and a primary button. The primary runs `action`, waits for the write's answer and closes
- * when it worked; a failure is shown above the buttons and the dialog stays open.
+ * when it worked; a failure is shown above the buttons and the dialog stays open. Enter in a field, or ⌘Enter
+ * (Ctrl+Enter off macOS) anywhere, code editors included, runs the primary; Escape cancels, once a field that uses
+ * Escape itself has had it.
  */
 const props = withDefaults(
   defineProps<{ title: string; primary: string; action: () => Promise<WriteResult>; danger?: boolean; disabled?: boolean; wide?: boolean }>(),
@@ -32,7 +35,7 @@ async function submit(): Promise<void> {
   if (result.ok) {
     emit('done');
     emit('close');
-  } else error.value = result.message;
+  } else if (!result.cancelled) error.value = result.message;
 }
 
 function close(): void {
@@ -40,25 +43,37 @@ function close(): void {
 }
 
 const id = Symbol('dialog');
+const isTop = () => open[open.length - 1] === id;
 
-function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && open[open.length - 1] === id) {
-    event.stopPropagation();
-    close();
-  }
+/** Before the focused field: the shortcut submits from editors too, and the page behind never gets it. */
+function onSubmitKey(event: KeyboardEvent): void {
+  if (!isTop() || !isSubmitShortcut(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void submit();
+}
+
+/** After the focused field, which may use Escape itself (a completion list, a selection) and then prevents it. */
+function onEscape(event: KeyboardEvent): void {
+  if (!isTop() || event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+  event.stopPropagation();
+  close();
 }
 
 let before: Element | null = null;
 onMounted(async () => {
   before = document.activeElement;
   open.push(id);
-  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('keydown', onSubmitKey, true);
+  document.addEventListener('keydown', onEscape);
   await nextTick();
+  // The first field; a dialog without fields, such as a confirmation, focuses its primary button so Enter confirms.
   const first = body.value?.querySelector<HTMLElement>('input:not([disabled]), select, textarea, [contenteditable="true"]');
-  (first ?? body.value?.querySelector<HTMLElement>('button'))?.focus();
+  (first ?? body.value?.querySelector<HTMLElement>('button[type="submit"]:not([disabled])') ?? body.value?.querySelector<HTMLElement>('button'))?.focus();
 });
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', onKey, true);
+  document.removeEventListener('keydown', onSubmitKey, true);
+  document.removeEventListener('keydown', onEscape);
   open.splice(open.indexOf(id), 1);
   if (before instanceof HTMLElement) before.focus();
 });
@@ -76,7 +91,7 @@ onBeforeUnmount(() => {
       <div class="foot">
         <slot name="foot-start" />
         <button type="button" class="btn cancel" @click="close">Cancel</button>
-        <button type="submit" class="btn" :class="danger ? 'danger' : 'btn-primary'" :disabled="disabled || busy">{{ busy ? 'Working…' : primary }}</button>
+        <button type="submit" class="btn" :class="danger ? 'danger' : 'btn-primary'" :disabled="disabled || busy" :title="`${primary} (${SUBMIT_KEY})`">{{ busy ? 'Working…' : primary }}</button>
       </div>
     </form>
   </div>

@@ -4,24 +4,24 @@ let runSeq = 0;
 </script>
 
 <script setup lang="ts">
-import type { KafkaWorkspaceHostMessage, KsqlColumn, KsqlResult } from '@datakit/core';
-import { computed, onActivated, onDeactivated, onUnmounted, ref } from 'vue';
+import { ksqlStatementWrites, type KafkaWorkspaceHostMessage, type KsqlColumn, type KsqlResult } from '@datakit/core';
+import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { isSubmitShortcut, SUBMIT_KEY } from '../components/shortcuts';
 import { onHostMessage } from '../host';
 import { formatElapsed, num, plural } from './format';
 import { useWorkspace } from './workspace';
 
 /**
  * A ksqlDB statement editor. Queries stream rows until they end or are stopped: Table shows the newest rows first,
- * Live appends them as they come, JSON shows one object per row. Other statements answer with JSON text.
+ * Live appends them as they come, JSON shows one object per row. Other statements answer with JSON text. The last
+ * statement run and `auto.offset.reset` are remembered for the data source.
  */
 const ws = useWorkspace();
 const s = ws.state;
 /** Rows kept at most; older ones are dropped. */
 const MAX_ROWS = 1000;
-/** What a read-only data source may run. */
-const READ_ONLY_STATEMENT = /^\s*(SELECT|SHOW|LIST|DESCRIBE|EXPLAIN|PRINT)\b/i;
 
 type Mode = 'table' | 'json' | 'live';
 const MODES: { id: Mode; label: string }[] = [
@@ -30,8 +30,9 @@ const MODES: { id: Mode; label: string }[] = [
   { id: 'live', label: 'Live' },
 ];
 
-const statement = ref('SHOW STREAMS;');
-const offsetReset = ref<'earliest' | 'latest'>('latest');
+const statement = ref(s.prefs.ksqlStatement ?? 'SHOW STREAMS;');
+const offsetReset = ref<'earliest' | 'latest'>(s.prefs.ksqlOffsetReset ?? 'latest');
+watch(offsetReset, (value) => ws.setPrefs({ ksqlOffsetReset: value }));
 const mode = ref<Mode>('table');
 const runId = ref(0);
 const running = ref(false);
@@ -46,7 +47,7 @@ const error = ref<string | null>(null);
 const live = ref<HTMLElement>();
 let clock: ReturnType<typeof setInterval> | undefined;
 
-const blocked = computed(() => s.init!.readOnly && !READ_ONLY_STATEMENT.test(statement.value));
+const blocked = computed(() => s.init!.readOnly && ksqlStatementWrites(statement.value));
 const push = computed(() => /\bEMIT\s+CHANGES\b/i.test(statement.value));
 const tableRows = computed(() => [...rows.value].reverse());
 const json = computed(() => rows.value.map((r) => JSON.stringify(Object.fromEntries(columns.value.map((c, i) => [c.name, r.values[i] ?? null])))).join('\n'));
@@ -56,12 +57,13 @@ const status = computed((): { text: string; error: boolean } => {
   if (running.value) return { text: `${plural(received.value, 'row')} · ${push.value ? 'push query' : 'query'} running ${formatElapsed(now.value - startedAt.value)}`, error: false };
   if (result.value?.kind === 'query') return { text: `${plural(result.value.rows, 'row')} · ${num(Math.round(durationMs.value))} ms`, error: false };
   if (result.value?.kind === 'statement') return { text: `Statement ran in ${num(Math.round(durationMs.value))} ms`, error: false };
-  return { text: s.init!.readOnly ? 'Read-only: SELECT, SHOW, LIST, DESCRIBE, EXPLAIN and PRINT statements run.' : 'Ctrl+Enter runs the statement.', error: false };
+  return { text: s.init!.readOnly ? 'Read-only: SELECT, SHOW, LIST, DESCRIBE, EXPLAIN and PRINT statements run.' : `${SUBMIT_KEY} runs the statement.`, error: false };
 });
 
 function run(): void {
   if (blocked.value || !statement.value.trim()) return;
   if (running.value) stopRun();
+  if (statement.value !== s.prefs.ksqlStatement) ws.setPrefs({ ksqlStatement: statement.value });
   runId.value = ++runSeq;
   running.value = true;
   startedAt.value = Date.now();
@@ -90,7 +92,7 @@ function stopRun(): void {
 }
 
 function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+  if (isSubmitShortcut(event)) {
     event.preventDefault();
     run();
   }
@@ -124,7 +126,8 @@ const stop = onHostMessage<KafkaWorkspaceHostMessage>((message) => {
       break;
     case 'ksqlFailed':
       finish();
-      error.value = message.message;
+      // Declining the Production confirmation leaves the page as it was before Run.
+      if (!message.cancelled) error.value = message.message;
       break;
   }
 });
@@ -155,7 +158,7 @@ onUnmounted(() => {
       <p v-if="s.errors.ksqlInfo" class="error-line" role="alert"><Icon name="error" :size="14" /> {{ s.errors.ksqlInfo }}</p>
       <div class="editor">
         <div class="editor-bar">
-          <IconButton v-if="!running" icon="run" label="Run (Ctrl+Enter)" filled tone="ok" :disabled="blocked || !statement.trim()" @click="run" />
+          <IconButton v-if="!running" icon="run" :label="`Run (${SUBMIT_KEY})`" filled tone="ok" :disabled="blocked || !statement.trim()" @click="run" />
           <IconButton v-else icon="stop" label="Stop the query" tone="danger" @click="stopRun" />
           <label class="note reset">
             auto.offset.reset

@@ -19,19 +19,21 @@ export type ScanParseResult = { ok: true; scan: ScanCommand; fromKeys: boolean }
 
 /**
  * Reads a SCAN command (`SCAN 0 MATCH user:* COUNT 500 TYPE hash`) or a KEYS command, which is turned into a SCAN
- * so a large database does not block the server. Returns null for other commands.
+ * so a large database does not block the server. A lone pattern such as `user:*` is read as `SCAN 0 MATCH user:*`,
+ * and a SCAN without a cursor starts at 0. Returns null for other commands.
  */
 export function parseScanCommand(args: readonly string[]): ScanParseResult | null {
   const name = args[0]?.toUpperCase();
+  // Command names never hold `*`, `?`, `[` or `:`; key patterns usually do.
+  if (args.length === 1 && /[*?[:]/.test(args[0]!)) return { ok: true, scan: { cursor: '0', match: args[0]!, count: null, type: null }, fromKeys: false };
   if (name === 'KEYS') {
-    if (args.length !== 2) return { ok: false, error: 'KEYS takes one pattern, e.g. KEYS user:*.' };
-    return { ok: true, scan: { cursor: '0', match: args[1]!, count: null, type: null }, fromKeys: true };
+    if (args.length > 2) return { ok: false, error: 'KEYS takes one pattern; put a pattern with spaces in quotes, e.g. KEYS "user name:*".' };
+    return { ok: true, scan: { cursor: '0', match: args[1] ?? '*', count: null, type: null }, fromKeys: true };
   }
   if (name !== 'SCAN') return null;
-  const cursor = args[1];
-  if (cursor === undefined || !/^\d+$/.test(cursor)) return { ok: false, error: 'SCAN needs a cursor first, e.g. SCAN 0 MATCH user:*.' };
-  const scan: ScanCommand = { cursor, match: '*', count: null, type: null };
-  for (let i = 2; i < args.length; i += 2) {
+  const hasCursor = args[1] !== undefined && /^\d+$/.test(args[1]);
+  const scan: ScanCommand = { cursor: hasCursor ? args[1]! : '0', match: '*', count: null, type: null };
+  for (let i = hasCursor ? 2 : 1; i < args.length; i += 2) {
     const option = args[i]!.toUpperCase();
     const value = args[i + 1];
     if (value === undefined) return { ok: false, error: `${option} needs a value.` };

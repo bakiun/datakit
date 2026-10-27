@@ -108,6 +108,8 @@ export class DataSourcesTree implements vscode.TreeDataProvider<ExplorerNode>, v
   readonly onDidChangeTreeData = this.changed.event;
   private readonly roots = new Map<string, DataSourceNode>();
   private readonly epochs = new Map<string, number>();
+  /** The last connection status seen per data source, to tell a cancelled connect from the others. */
+  private readonly statuses = new Map<string, ConnectionStatus>();
   private readonly databases = new Map<string, Promise<string[]>>();
   private readonly objects = new Map<string, Promise<DatabaseObjects>>();
   /** PostgreSQL schemas by `id\ndatabase`, and their objects by `id\ndatabase\nschema`. */
@@ -138,8 +140,17 @@ export class DataSourcesTree implements vscode.TreeDataProvider<ExplorerNode>, v
       store.onDidChange(() => this.changed.fire(undefined)),
       consoles.onDidChange((id) => this.changed.fire(this.roots.get(id))),
       sessions.onDidChangeStatus((id) => {
+        const status = sessions.status(id);
+        const was = this.statuses.get(id);
+        this.statuses.set(id, status);
         // Metadata belongs to a session; keep it only while that session is connected.
-        if (sessions.status(id) !== 'connected') this.clearCache(id);
+        if (status !== 'connected') this.clearCache(id);
+        // A dismissed password prompt leaves the data source idle. Folding it keeps its expanded node from asking
+        // again at once; expanding it again asks again.
+        if (was === 'connecting' && status === 'idle') {
+          this.collapse(id);
+          return;
+        }
         // Under a filter a data source can appear or disappear once it can be searched.
         this.changed.fire(this.filter ? undefined : this.roots.get(id));
       }),
@@ -375,8 +386,15 @@ export class DataSourcesTree implements vscode.TreeDataProvider<ExplorerNode>, v
       case 'message': {
         const item = new vscode.TreeItem(node.message, vscode.TreeItemCollapsibleState.None);
         item.id = node.itemId;
-        item.tooltip = node.message;
         item.iconPath = node.isError ? new vscode.ThemeIcon('error', new vscode.ThemeColor('errorForeground')) : new vscode.ThemeIcon('info');
+        // A failed connection offers Retry and Edit Data Source beside the error; a failed listing below it, Retry.
+        if (node.isError) {
+          const connection = node.parent.kind === 'dataSource';
+          item.contextValue = connection ? 'connectionError' : 'listingError';
+          item.tooltip = `${node.message}\n\n${connection ? 'Retry, or edit the data source to fix its settings.' : 'Retry to read it again.'}`;
+        } else {
+          item.tooltip = node.message;
+        }
         return item;
       }
     }

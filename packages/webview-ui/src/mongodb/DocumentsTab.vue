@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { MONGO_EXPORT_FORMATS, type MongoCollectionHostMessage, type MongoDocument, type MongoExportFormat, type MongoFindQuery } from '@datakit/core';
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
+import {
+  MONGO_EXPORT_FORMATS,
+  type MongoCollectionHostMessage,
+  type MongoDocument,
+  type MongoDocumentsView,
+  type MongoExportFormat,
+  type MongoFindQuery,
+} from '@datakit/core';
+import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from 'vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
@@ -20,7 +27,9 @@ import UpdateMatchingDialog from './UpdateMatchingDialog.vue';
 
 /**
  * The Documents tab: the query bar, then the page of documents as cards, a table or one array, and the picked
- * document in a pane beside them. Paging moves the skip by the page size from the Skip of the query.
+ * document in a pane beside them. Paging moves the skip by the page size from the Skip of the query. The view, the
+ * page size and the export format are remembered for the next tab. Unsaved edits in the pane are never dropped
+ * without asking: picking another document asks first, and paging keeps the pane open.
  */
 const props = defineProps<{ active: boolean }>();
 const col = useCollection();
@@ -44,20 +53,30 @@ const durationMs = ref(0);
 /** The documents version the page was read at; a newer one reads it again. */
 let readVersion = -1;
 
-type Mode = 'list' | 'table' | 'json';
-const MODES: { id: Mode; label: string }[] = [
+const MODES: { id: MongoDocumentsView; label: string }[] = [
   { id: 'list', label: 'List' },
   { id: 'table', label: 'Table' },
   { id: 'json', label: 'JSON' },
 ];
-const mode = ref<Mode>('list');
+const mode = ref<MongoDocumentsView>(s.init!.prefs.view);
+watch(mode, (view) => col.remember({ view }));
+const exportFormat = ref<MongoExportFormat>(s.init!.prefs.exportFormat);
+watch(exportFormat, (format) => col.remember({ exportFormat: format }));
 
 const pickedKey = ref<string | null>(null);
-const picked = computed(() => documents.value.find((d, i) => documentKey(d, i) === pickedKey.value) ?? null);
+/** The document in the pane, as last read; it stays while the pane has unsaved edits, even when paging moves on. */
+const picked = shallowRef<MongoDocument | null>(null);
+const paneDirty = ref(false);
 const focusRequest = ref(0);
 
-type Dialog = { kind: 'insert'; title: string; text: string } | { kind: 'delete'; document: MongoDocument } | { kind: 'updateMatching' } | { kind: 'deleteMatching' };
+type Dialog =
+  | { kind: 'insert'; title: string; text: string }
+  | { kind: 'delete'; document: MongoDocument }
+  | { kind: 'updateMatching' }
+  | { kind: 'deleteMatching' }
+  | { kind: 'discard'; then: () => void };
 const dialog = ref<Dialog | null>(null);
+const production = computed(() => s.init!.environment === 'production');
 
 const DEFAULT_PANE_WIDTH = 420;
 const paneWidth = ref(DEFAULT_PANE_WIDTH);
@@ -69,6 +88,10 @@ const pageSkip = computed(() => applied.value.skip + pageIndex.value * pageSize.
 const lastIndex = computed(() => lastPageIndex(count.value, applied.value.skip, pageSize.value));
 const hasNext = computed(() => (count.value === null ? documents.value.length === pageSize.value : pageSkip.value + documents.value.length < count.value));
 const hasFilter = computed(() => !!applied.value.filter && !/^\{\s*\}$/.test(applied.value.filter));
+const deleteMatchingTitle = computed(() => {
+  if (!hasFilter.value) return 'Find with a filter first; deleting with an empty filter is refused';
+  return count.value === 0 ? 'No documents match the filter' : 'Delete every document that matches the filter';
+});
 
 const status = computed((): { text: string; tone: 'ok' | 'error' | 'muted' } => {
   if (error.value) return { text: error.value, tone: 'error' };
@@ -126,6 +149,7 @@ function goTo(index: number): void {
 }
 
 watch(pageSize, (size) => {
+  col.remember({ pageSize: size });
   applied.value = { ...applied.value, limit: size };
   pageIndex.value = 0;
   fetchPage();
@@ -139,26 +163,49 @@ watch(
   },
 );
 
-function pick(_d: MongoDocument, key: string): void {
+/** Runs `then`, after asking whether to drop the pane's unsaved edits when it has some. */
+function leavePane(then: () => void): void {
+  if (paneDirty.value) dialog.value = { kind: 'discard', then };
+  else then();
+}
+
+function show(d: MongoDocument | null, key: string | null): void {
+  picked.value = d;
   pickedKey.value = key;
 }
 
-function edit(_d: MongoDocument, key: string): void {
-  pickedKey.value = key;
-  void nextTick(() => focusRequest.value++);
+function pick(d: MongoDocument, key: string): void {
+  if (key !== pickedKey.value) leavePane(() => show(d, key));
+}
+
+function edit(d: MongoDocument, key: string): void {
+  const focus = () => void nextTick(() => focusRequest.value++);
+  if (key === pickedKey.value) focus();
+  else leavePane(() => (show(d, key), focus()));
+}
+
+function closePane(): void {
+  leavePane(() => show(null, null));
+}
+
+const discard = async () => {
+  const then = (dialog.value as { then: () => void }).then;
+  paneDirty.value = false;
+  then();
+  return { ok: true, message: '' };
+};
+
+function addDocument(): void {
+  dialog.value = { kind: 'insert', title: 'Add document', text: '{\n  \n}' };
 }
 
 function copyDocument(d: MongoDocument): void {
   col.copy(d.text, `the document ${d.idText ?? ''}`.trim());
 }
 
-function exportAs(event: Event): void {
-  const select = event.target as HTMLSelectElement;
-  const format = select.value as MongoExportFormat | '';
-  select.value = '';
-  if (!format) return;
+function exportDocuments(): void {
   const { filter, projection, sort } = applied.value;
-  col.post({ type: 'export', query: { filter, projection, sort }, format });
+  col.post({ type: 'export', query: { filter, projection, sort }, format: exportFormat.value });
 }
 
 const deleteOne = () => {
@@ -186,7 +233,10 @@ const stop = onHostMessage<MongoCollectionHostMessage>((message) => {
   documents.value = message.page.documents;
   count.value = message.page.count;
   durationMs.value = message.durationMs;
-  if (pickedKey.value !== null && !documents.value.some((d, i) => documentKey(d, i) === pickedKey.value)) pickedKey.value = null;
+  if (pickedKey.value === null) return;
+  const fresh = documents.value.find((d, i) => documentKey(d, i) === pickedKey.value);
+  if (fresh) picked.value = fresh;
+  else if (!paneDirty.value) show(null, null);
 });
 onUnmounted(stop);
 
@@ -217,21 +267,21 @@ fetchPage();
 
     <div role="toolbar" aria-label="Documents" class="toolbar">
       <template v-if="canWrite">
-        <button type="button" class="btn sm btn-primary" @click="dialog = { kind: 'insert', title: 'Add document', text: '{\n  \n}' }">
-          <Icon name="plus" :size="14" /> Add document
-        </button>
+        <button type="button" class="btn sm btn-primary" @click="addDocument"><Icon name="plus" :size="14" /> Add document</button>
       </template>
-      <select class="sel export" aria-label="Export every document that matches the query" title="Export every document that matches the query, not only this page" value="" @change="exportAs">
-        <option value="">Export…</option>
-        <option v-for="f in MONGO_EXPORT_FORMATS" :key="f.value" :value="f.value">{{ f.label }}</option>
-      </select>
+      <span class="export" role="group" aria-label="Export">
+        <select v-model="exportFormat" class="sel" aria-label="Export format">
+          <option v-for="f in MONGO_EXPORT_FORMATS" :key="f.value" :value="f.value">{{ f.label }}</option>
+        </select>
+        <button type="button" class="btn sm" title="Export every document that matches the query, not only this page" @click="exportDocuments">Export…</button>
+      </span>
       <template v-if="canWrite">
         <button type="button" class="btn sm" @click="dialog = { kind: 'updateMatching' }">Update matching…</button>
         <button
           type="button"
           class="btn sm danger-text"
-          :disabled="!hasFilter"
-          :title="hasFilter ? 'Delete every document that matches the filter' : 'Find with a filter first; deleting with an empty filter is refused'"
+          :disabled="!hasFilter || count === 0"
+          :title="deleteMatchingTitle"
           @click="dialog = { kind: 'deleteMatching' }"
         >
           Delete matching…
@@ -261,8 +311,11 @@ fetchPage();
           <DocumentTable v-else-if="mode === 'table'" :documents="documents" :picked="pickedKey" :can-write="canWrite" @pick="pick" @open="edit" />
           <DocumentsJson v-else :documents="documents" />
         </template>
+        <p v-else-if="loaded && (hasFilter || applied.skip)" class="empty-state">
+          No documents match this query. <button type="button" class="lnk" @click="reset">Clear the query</button>
+        </p>
         <p v-else-if="loaded" class="empty-state">
-          {{ hasFilter || applied.skip ? 'No documents match this query.' : canWrite ? 'The collection is empty. Add a document to get started.' : 'The collection is empty.' }}
+          The collection is empty.<template v-if="canWrite"> <button type="button" class="lnk" @click="addDocument">Add a document</button></template>
         </p>
       </div>
       <template v-if="picked">
@@ -276,7 +329,15 @@ fetchPage();
           :max="maxPaneWidth"
           :default-size="DEFAULT_PANE_WIDTH"
         />
-        <DocumentPane class="pane" :document="picked" :read-only-reason="col.readOnlyReason.value" :focus-request="focusRequest" @close="pickedKey = null" />
+        <DocumentPane
+          class="pane"
+          :document="picked"
+          :read-only-reason="col.readOnlyReason.value"
+          :focus-request="focusRequest"
+          @close="closePane"
+          @deleted="show(null, null)"
+          @dirty="paneDirty = $event"
+        />
       </template>
     </div>
     <p v-if="mode === 'table' && canWrite && documents.length" class="hint">
@@ -297,13 +358,21 @@ fetchPage();
       v-else-if="dialog?.kind === 'deleteMatching'"
       title="Delete matching documents"
       :text="`Deletes every document in ${s.init!.collection} that matches this filter${count === null ? '' : ` (${plural(count, 'document')} at the last Find)`}. This cannot be undone.`"
-      primary="Delete documents"
-      :target="s.init!.collection"
+      :primary="count === null ? 'Delete documents' : `Delete ${plural(count, 'document')}`"
+      :target="production ? s.init!.collection : null"
       :action="deleteMatching"
       @close="dialog = null"
     >
       <pre class="filter-shown" :title="oneLine(applied.filter, 400)"><ShellText :text="applied.filter" /></pre>
     </ConfirmDialog>
+    <ConfirmDialog
+      v-else-if="dialog?.kind === 'discard'"
+      title="Discard changes"
+      :text="`The document ${picked?.idText ?? ''} has changes that are not saved. Discard them?`"
+      primary="Discard changes"
+      :action="discard"
+      @close="dialog = null"
+    />
   </div>
 </template>
 
@@ -350,7 +419,8 @@ fetchPage();
   height: 26px;
 }
 .export {
-  width: 96px;
+  display: inline-flex;
+  gap: 4px;
 }
 .range {
   padding: 0 6px;

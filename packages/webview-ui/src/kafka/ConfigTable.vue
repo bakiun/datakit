@@ -4,8 +4,8 @@ import { computed, ref, type Directive } from 'vue';
 import IconButton from '../components/IconButton.vue';
 
 /**
- * Config entries of a topic or broker, overrides first. Clicking a value edits it: Enter saves, Escape or leaving
- * the cell cancels. An override can be reset, so the default applies again.
+ * Config entries of a topic or broker, overrides first. Clicking a value edits it: Enter or leaving the cell saves a
+ * changed value, Escape cancels. An override can be reset, so the default applies again.
  */
 const props = defineProps<{
   entries: KafkaConfigEntry[];
@@ -46,6 +46,14 @@ function onKey(event: KeyboardEvent, entry: KafkaConfigEntry): void {
     editing.value = null;
     if (draft !== (entry.value ?? '') || entry.sensitive) emit('set', entry.name, draft);
   }
+}
+
+/** Leaving the cell keeps what was typed; a hidden value left empty stays as it is. */
+function onBlur(entry: KafkaConfigEntry): void {
+  if (editing.value?.name !== entry.name) return;
+  const draft = editing.value.draft;
+  editing.value = null;
+  if (entry.sensitive ? draft !== '' : draft !== (entry.value ?? '')) emit('set', entry.name, draft);
 }
 
 function sourceChip(source: KafkaConfigSource): { label: string; title: string; tone: string } | null {
@@ -91,7 +99,7 @@ function sourceChip(source: KafkaConfigSource): { label: string; title: string; 
                 :aria-label="`Value of ${e.name}`"
                 spellcheck="false"
                 @keydown="onKey($event, e)"
-                @blur="editing = null"
+                @blur="onBlur(e)"
               />
               <div v-else class="value-row">
                 <button

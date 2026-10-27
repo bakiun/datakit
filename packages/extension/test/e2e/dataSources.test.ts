@@ -39,6 +39,18 @@ async function answeringWarning<T>(answer: string, run: () => Thenable<T>): Prom
   }
 }
 
+/** Replaces a `vscode.window` function while `run` runs. */
+async function stubbing<T>(name: 'showInputBox' | 'showQuickPick', stub: (...args: unknown[]) => unknown, run: () => Thenable<T> | Promise<T>): Promise<T> {
+  const window = vscode.window as unknown as Record<string, unknown>;
+  const original = window[name];
+  window[name] = stub;
+  try {
+    return await run();
+  } finally {
+    window[name] = original;
+  }
+}
+
 suite('Data sources', () => {
   let api: TestApi;
 
@@ -166,6 +178,50 @@ suite('Data sources', () => {
     assert.equal(api.sessions.status(dataSource.id), 'failed');
     assert.equal(children.length, 1);
     assert.match(labelOf(api, children[0]!), /Access denied for user 'app'/);
+    // The error offers Retry and Edit Data Source beside it.
+    assert.equal(api.tree.getTreeItem(children[0]!).contextValue, 'connectionError');
+  });
+
+  test('a password that is not saved is asked for once per connection', async () => {
+    const dataSource = await api.store.save(null, mysqlSettings('ask-me', { passwordStorage: 'never' }), {});
+    assert.deepEqual(await api.store.storedSecrets(dataSource), { password: false, sshPassword: false, sshPassphrase: false });
+    let asked = 0;
+    const askPassword = async () => {
+      asked++;
+      return 'app-secret';
+    };
+    await stubbing('showInputBox', askPassword, async () => {
+      await api.sessions.connect(dataSource.id);
+      // A data view's own session and a refresh reuse the password the open session was given.
+      const dedicated = await api.sessions.openDedicatedSql(dataSource.id);
+      await dedicated.close();
+      await api.sessions.reconnect(dataSource.id);
+      assert.equal(asked, 1);
+      await api.sessions.disconnect(dataSource.id);
+      await api.sessions.connect(dataSource.id);
+      assert.equal(asked, 2, 'a new connection asks again');
+    });
+    assert.deepEqual(await api.store.storedSecrets(dataSource), { password: false, sshPassword: false, sshPassphrase: false });
+  });
+
+  test('dismissing the password prompt folds the data source instead of asking again', async () => {
+    const dataSource = await api.store.save(null, mysqlSettings('dismissed', { passwordStorage: 'never' }), {});
+    const node = await rootNode(dataSource);
+    const children = await stubbing('showInputBox', async () => undefined, () => api.tree.getChildren(node));
+    assert.deepEqual(children, []);
+    assert.equal(api.sessions.status(dataSource.id), 'idle');
+    assert.notEqual((await rootNode(dataSource)).itemId, node.itemId, 'the node gets a new id, so it shows collapsed');
+  });
+
+  test('a command from the Command Palette uses the only data source it fits', async () => {
+    const connected = await api.store.save(null, mysqlSettings('connected'), { password: 'app-secret' });
+    await api.store.save(null, mysqlSettings('idle'), { password: 'app-secret' });
+    await api.sessions.connect(connected.id);
+    const noPicker = () => {
+      throw new Error('no list is shown');
+    };
+    await stubbing('showQuickPick', noPicker, () => vscode.commands.executeCommand('datakit.disconnectDataSource'));
+    assert.equal(api.sessions.status(connected.id), 'idle');
   });
 
   test('refresh, disconnect and delete work from the commands', async () => {
@@ -226,5 +282,11 @@ suite('Data sources', () => {
     const dataSource = await api.store.save(null, mysqlSettings('shop-dev'), { password: 'app-secret' });
     await vscode.commands.executeCommand('datakit.editDataSource', await rootNode(dataSource));
     await waitFor(() => editorTabs('Data Source: shop-dev')[0], 'the editor tab');
+  });
+
+  test('Edit also takes the data source id, as the Edit Data Source button of a connection error passes it', async () => {
+    const dataSource = await api.store.save(null, mysqlSettings('by-id'), { password: 'app-secret' });
+    await vscode.commands.executeCommand('datakit.editDataSource', dataSource.id);
+    await waitFor(() => editorTabs('Data Source: by-id')[0], 'the editor tab');
   });
 });

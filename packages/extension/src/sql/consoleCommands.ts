@@ -49,7 +49,12 @@ export function registerConsoleCommands(services: Services): vscode.Disposable[]
         await QueryConsolePanel.create(services, node.parent.parent.id, node.parent.name, '', node.name);
         return;
       }
-      const dataSource = await target(services, node);
+      // From the Command Palette, only the data sources a console can run SQL on are offered.
+      const dataSource = await target(services, node, {
+        accept: (d) => d.engine === 'mysql' || d.engine === 'postgres',
+        none: 'No MySQL, MariaDB or PostgreSQL data sources yet.',
+        newEngine: 'mysql',
+      });
       if (dataSource) await QueryConsolePanel.create(services, dataSource.id, null);
     }),
     vscode.commands.registerCommand('datakit.openConsole', (node?: unknown) => {

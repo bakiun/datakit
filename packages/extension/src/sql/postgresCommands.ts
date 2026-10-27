@@ -86,7 +86,8 @@ async function refreshMaterializedView(services: Services, node: unknown): Promi
       }
     });
     services.tree.reload(object.dataSourceId);
-    void vscode.window.showInformationMessage(`Refreshed materialized view ${name} (${seconds(took)}).`);
+    // Routine success: a quiet status bar line, not a notification to dismiss.
+    vscode.window.setStatusBarMessage(`$(check) Refreshed materialized view ${name} (${seconds(took)})`, 5000);
   } catch (error) {
     if (!(error instanceof CancelledError)) void vscode.window.showErrorMessage(`Could not refresh ${name}: ${errorMessage(error)}`);
   }

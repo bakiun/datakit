@@ -25,7 +25,8 @@ const changed = computed(() => newPartitions.value !== props.detail.partitions |
 
 async function set(name: string, value: string | null): Promise<void> {
   saving.value = name;
-  await ws.write({ kind: 'setTopicConfig', topic: props.detail.name, name, value });
+  // The table shows the new value once the settings are read again, so no toast repeats it.
+  await ws.write({ kind: 'setTopicConfig', topic: props.detail.name, name, value }, { announce: false });
   saving.value = null;
 }
 
@@ -43,7 +44,7 @@ const recreate = () => ws.write({ kind: 'recreateTopic', topic: props.detail.nam
 <template>
   <div class="topic-settings">
     <div class="tools">
-      <span class="note">{{ readOnly ? 'Read-only: settings can be looked at, not changed.' : 'Click a value to change it. Partitions and replication factor are edited below.' }}</span>
+      <span class="note">{{ readOnly ? 'Read-only: settings can be looked at, not changed.' : 'Click a value to change it; Escape cancels the edit.' }}</span>
       <div v-if="!readOnly" class="actions">
         <button type="button" class="btn" @click="openPartitions">Partitions / RF…</button>
         <button type="button" class="btn danger-text" @click="dialog = 'recreate'">Re-create topic…</button>
@@ -77,10 +78,10 @@ const recreate = () => ws.write({ kind: 'recreateTopic', topic: props.detail.nam
     </KafkaDialog>
     <ConfirmDialog
       v-else-if="dialog === 'recreate'"
-      title="Re-create topic"
+      :title="`Re-create ${detail.name}`"
       text="Deletes and immediately re-creates the topic with the same settings. All messages are lost."
       :target="detail.name"
-      primary="Re-create"
+      primary="Re-create topic"
       :action="recreate"
       @close="dialog = null"
     />

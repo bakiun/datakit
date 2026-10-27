@@ -2,6 +2,7 @@
 import { DATA_PAGE_SIZES, EXPORT_FORMATS } from '@datakit/core';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import DataGrid from './DataGrid.vue';
 import type { SqlView } from './useSqlView';
 
@@ -14,7 +15,12 @@ const props = withDefaults(defineProps<{ view: SqlView; runControls?: boolean; e
   emptyText: '',
 });
 const emit = defineEmits<{ goto: [position: number] }>();
-const lockedTitle = 'Submit or revert your changes first';
+const pendingTitle = 'Submit or revert your grid changes first';
+
+/** A paging control's label, with why it is off when the rows cannot be paged now. */
+function pagingLabel(label: string): string {
+  return props.view.pagingOff ? `${label} — ${props.view.pagingOff}` : label;
+}
 
 function copyError(): void {
   const v = props.view;
@@ -39,18 +45,18 @@ function gotoFailed(): void {
   </div>
 
   <div role="toolbar" aria-label="Result actions" class="toolbar">
-    <IconButton icon="first" label="First page" :disabled="view.locked || !view.pageable || view.offset === 0" @click="view.repage({ offset: 0 })" />
+    <IconButton icon="first" :label="pagingLabel('First page')" :disabled="view.locked || !view.pageable || view.offset === 0" @click="view.repage({ offset: 0 })" />
     <IconButton
       icon="previous"
-      label="Previous page"
+      :label="pagingLabel('Previous page')"
       :disabled="view.locked || !view.pageable || view.offset === 0"
       @click="view.repage({ offset: Math.max(0, view.offset - view.limit) })"
     />
-    <label class="range" :title="view.pending ? lockedTitle : undefined">
+    <label v-if="view.page" class="range" :title="view.pagingOff ? `Rows per page — ${view.pagingOff}` : undefined">
       <span class="mono">{{ view.rowCount ? `${view.offset + 1}–${view.offset + view.rowCount}` : '0' }}</span>
       <select
         class="sel"
-        aria-label="Rows per page (LIMIT)"
+        :aria-label="pagingLabel('Rows per page (LIMIT)')"
         :value="view.limit"
         :disabled="view.locked || !view.pageable"
         @change="view.setLimit(Number(($event.target as HTMLSelectElement).value))"
@@ -62,21 +68,36 @@ function gotoFailed(): void {
     </label>
     <IconButton
       icon="next"
-      label="Next page"
+      :label="pagingLabel('Next page')"
       :disabled="view.locked || !view.pageable || !view.hasNext"
       @click="view.repage({ offset: view.offset + view.limit })"
     />
     <IconButton
       icon="last"
-      label="Last page"
+      :label="pagingLabel('Last page')"
       :disabled="view.locked || !view.pageable || !view.hasNext || view.pageCount === null"
       @click="view.repage({ offset: ((view.pageCount ?? 1) - 1) * view.limit })"
     />
     <span class="sep" />
-    <IconButton icon="reload" :label="view.page ? 'Reload page' : 'Run'" :disabled="view.locked" @click="view.reload()" />
+    <IconButton
+      icon="reload"
+      :label="!view.page ? 'Run' : view.pending ? `Reload page — ${view.pagingOff}` : 'Reload page'"
+      :disabled="view.locked"
+      @click="view.reload()"
+    />
     <span class="sep" />
-    <IconButton icon="plus" label="Add row" :disabled="!view.editable || view.loading" @click="view.changes.addRow()" />
-    <IconButton icon="minus" label="Delete selected rows" :disabled="!view.editable || !view.selection.length" @click="view.deleteSelected()" />
+    <IconButton
+      icon="plus"
+      :label="view.readOnly ? `Add row — ${view.readOnly}` : 'Add row'"
+      :disabled="!view.editable || view.loading"
+      @click="view.changes.addRow()"
+    />
+    <IconButton
+      :icon="view.selectionDeleted ? 'revert' : 'minus'"
+      :label="view.selectionDeleted ? 'Restore selected rows' : 'Delete selected rows'"
+      :disabled="!view.editable || !view.selection.length"
+      @click="view.deleteSelected()"
+    />
     <IconButton icon="copy" label="Duplicate selected row" :disabled="!view.editable || view.selection.length !== 1" @click="view.duplicateSelected()" />
     <span class="sep" />
     <label v-if="runControls" class="field">
@@ -84,6 +105,7 @@ function gotoFailed(): void {
       <select
         class="sel"
         aria-label="Transaction mode"
+        :title="view.transaction.open ? 'Commit or roll back the open transaction to change the mode' : undefined"
         :value="view.autoCommit ? 'auto' : 'manual'"
         :disabled="view.transaction.open"
         @change="view.setTx(($event.target as HTMLSelectElement).value === 'auto')"
@@ -92,11 +114,27 @@ function gotoFailed(): void {
         <option value="manual">Manual</option>
       </select>
     </label>
-    <IconButton icon="check" label="Submit changes (Ctrl+Enter)" tone="ok" :disabled="!view.pending || view.submitting" @click="view.submit()" />
+    <IconButton icon="check" :label="`Submit changes (${SUBMIT_KEY})`" tone="ok" :disabled="!view.pending || view.submitting" @click="view.submit()" />
     <IconButton icon="revert" label="Revert changes" :disabled="!view.pending || view.submitting" @click="view.revert()" />
     <template v-if="view.transaction.open">
-      <button type="button" class="btn small primary" :disabled="view.loading || view.pending > 0" @click="view.endTransaction('commit')">Commit</button>
-      <button type="button" class="btn small" :disabled="view.loading || view.pending > 0" @click="view.endTransaction('rollback')">Rollback</button>
+      <button
+        type="button"
+        class="btn small primary"
+        :title="view.pending ? pendingTitle : undefined"
+        :disabled="view.loading || view.pending > 0"
+        @click="view.endTransaction('commit')"
+      >
+        Commit
+      </button>
+      <button
+        type="button"
+        class="btn small"
+        :title="view.pending ? pendingTitle : undefined"
+        :disabled="view.loading || view.pending > 0"
+        @click="view.endTransaction('rollback')"
+      >
+        Rollback
+      </button>
     </template>
     <IconButton v-if="runControls" icon="stop" label="Stop query" tone="danger" :disabled="!view.loading" @click="view.post({ type: 'stop' })" />
     <span class="sep" />
@@ -112,7 +150,7 @@ function gotoFailed(): void {
     </select>
     <IconButton
       icon="download"
-      :label="view.exportScope === 'all' ? 'Export all rows of the query' : 'Export the rows on this page'"
+      :label="!view.page?.rows.length ? 'No rows to export' : view.exportScope === 'all' ? 'Export all rows of the query' : 'Export the rows on this page'"
       :disabled="!view.page?.rows.length"
       @click="view.exportRows()"
     />
@@ -129,13 +167,14 @@ function gotoFailed(): void {
       :changes="view.changes"
       :editable="view.editable"
       :sortable="view.pageable && !view.locked"
+      :unsortable="view.pagingOff"
       @sort="view.sortBy"
     />
     <p v-else-if="emptyText" class="empty">{{ emptyText }}</p>
   </div>
 
   <footer class="footer">
-    <span>{{ view.selection.length ? `${view.selection.length} row${view.selection.length > 1 ? 's' : ''} selected` : 'No rows selected' }}</span>
+    <span v-if="view.page">{{ view.selection.length ? `${view.selection.length} row${view.selection.length > 1 ? 's' : ''} selected` : 'No rows selected' }}</span>
     <span v-if="view.pending" class="pending">{{ view.pending }} pending change{{ view.pending > 1 ? 's' : '' }} — not written yet</span>
     <span v-if="view.transaction.open" class="pending">
       Transaction open: {{ view.transaction.changes }} change{{ view.transaction.changes === 1 ? '' : 's' }} not committed. Closing this tab rolls them

@@ -120,6 +120,16 @@ export function useTableChanges(page: Ref<LoadedPage | null>) {
     inserts.value = inserts.value.filter((r) => !dropped.has(r.id));
   }
 
+  /** Takes back the deletion of loaded rows. */
+  function restore(ids: Iterable<RowId>): void {
+    const next = new Set(deleted.value);
+    for (const id of ids) {
+      const index = pageIndexOf(id);
+      if (index !== null) next.delete(index);
+    }
+    deleted.value = next;
+  }
+
   function isDeleted(id: RowId): boolean {
     const index = pageIndexOf(id);
     return index !== null && deleted.value.has(index);
@@ -142,7 +152,7 @@ export function useTableChanges(page: Ref<LoadedPage | null>) {
     return result;
   }
 
-  return { inserts, count, valueOf, isChanged, isDeleted, setCell, revertCell, addRow, duplicate, remove, reset, changes };
+  return { inserts, count, valueOf, isChanged, isDeleted, setCell, revertCell, addRow, duplicate, remove, restore, reset, changes };
 }
 
 export type TableChanges = ReturnType<typeof useTableChanges>;

@@ -1,46 +1,70 @@
 <script setup lang="ts">
-import type { RedisEdit, RedisKeyDetail } from '@datakit/core';
-import { ref, type Directive } from 'vue';
+import { editProblem, type RedisEdit, type RedisKeyDetail } from '@datakit/core';
+import { ref, watch, type Directive } from 'vue';
 import Icon from '../components/Icon.vue';
-import { formatBytes, longTtl, textOf } from './format';
+import { formatBytes, longTtl, parseTtl, textOf } from './format';
 import TypeBadge from './TypeBadge.vue';
 
-/** The key above its value: click the name to rename it (RENAME) or the TTL to change it (EXPIRE, PERSIST). */
+/**
+ * The key above its value: click the name to rename it (RENAME) or the TTL to change it (EXPIRE, PERSIST). A TTL
+ * that cannot be read keeps its editor open with the reason.
+ */
 const props = defineProps<{ detail: RedisKeyDetail; readOnly: boolean }>();
-const emit = defineEmits<{ edit: [edit: RedisEdit] }>();
+/** `dismiss`: an editor was closed with Esc, so a message about its last write is no longer current. */
+const emit = defineEmits<{ edit: [edit: RedisEdit]; dismiss: [] }>();
 
+const READ_ONLY = 'The data source is read-only';
 const editing = ref<'name' | 'ttl' | null>(null);
 const draft = ref('');
+const problem = ref<string | null>(null);
 const vFocus: Directive<HTMLInputElement> = { mounted: (el) => (el.focus(), el.select()) };
+watch(draft, () => (problem.value = null));
 
-function start(what: 'name' | 'ttl'): void {
+function start(what: 'name' | 'ttl', text?: string): void {
   if (props.readOnly) return;
   editing.value = what;
-  draft.value = what === 'name' ? textOf(props.detail.key) : props.detail.ttl === null ? '' : String(props.detail.ttl);
+  draft.value = text ?? (what === 'name' ? textOf(props.detail.key) : props.detail.ttl === null ? '' : String(props.detail.ttl));
+  problem.value = null;
 }
 
 function commit(): void {
   const what = editing.value;
-  editing.value = null;
   const value = draft.value.trim();
-  if (what === 'name' && value && value !== textOf(props.detail.key)) emit('edit', { kind: 'renameKey', key: props.detail.key, to: value });
+  let edit: RedisEdit | null = null;
+  if (what === 'name' && value && value !== textOf(props.detail.key)) edit = { kind: 'renameKey', key: props.detail.key, to: value };
   if (what === 'ttl') {
-    const ttl = value === '' ? null : Number(value.replace(/[^0-9]/g, ''));
-    if (ttl !== props.detail.ttl) emit('edit', { kind: 'expire', key: props.detail.key, ttl });
+    const ttl = parseTtl(value);
+    if (ttl !== props.detail.ttl) edit = { kind: 'expire', key: props.detail.key, ttl };
   }
+  problem.value = edit && editProblem(edit);
+  if (problem.value) return;
+  editing.value = null;
+  if (edit) emit('edit', edit);
 }
 
 function onKey(event: KeyboardEvent): void {
   if (event.key === 'Enter') commit();
-  if (event.key === 'Escape') editing.value = null;
+  if (event.key === 'Escape') {
+    editing.value = null;
+    emit('dismiss');
+  }
 }
+
+/** Opens the editor again with an edit that was not written, e.g. a rename to a name that is taken. */
+function restore(edit: RedisEdit): boolean {
+  if (edit.kind === 'renameKey') start('name', edit.to);
+  else if (edit.kind === 'expire') start('ttl', edit.ttl === null ? '' : String(edit.ttl));
+  else return false;
+  return true;
+}
+defineExpose({ restore });
 </script>
 
 <template>
   <div class="key-header">
     <TypeBadge :type="detail.type" />
     <input v-if="editing === 'name'" v-model="draft" v-focus class="fld mono name-input" aria-label="Key name" @keydown="onKey" @blur="commit" />
-    <button v-else type="button" class="name mono" :title="readOnly ? textOf(detail.key) : 'Click to rename'" @click="start('name')">
+    <button v-else type="button" class="name mono" :title="readOnly ? textOf(detail.key) : `${textOf(detail.key)} · click to rename`" @click="start('name')">
       {{ textOf(detail.key) }}
     </button>
     <span class="fact">
@@ -50,14 +74,18 @@ function onKey(event: KeyboardEvent): void {
         v-model="draft"
         v-focus
         class="fld mono ttl-input"
+        :class="{ invalid: problem }"
         aria-label="TTL in seconds"
-        placeholder="seconds, empty = no expiry"
+        :aria-invalid="!!problem"
+        :title="problem ?? 'Seconds, or e.g. 30m, 2h, 1d; empty = no expiry'"
+        placeholder="e.g. 3600, 30m, 2h; empty = no expiry"
         @keydown="onKey"
         @blur="commit"
       />
-      <button v-else type="button" class="value mono" :class="{ expires: detail.ttl !== null }" :title="readOnly ? '' : 'Click to change'" @click="start('ttl')">
+      <button v-else type="button" class="value mono" :class="{ expires: detail.ttl !== null }" :title="readOnly ? READ_ONLY : 'Click to change'" @click="start('ttl')">
         {{ longTtl(detail.ttl) }}
       </button>
+      <span v-if="problem" class="problem" role="alert">{{ problem }}</span>
     </span>
     <span class="fact">Size <span class="value mono">{{ formatBytes(detail.size) }}</span></span>
     <span v-if="detail.encoding" class="fact">Encoding <span class="value mono">{{ detail.encoding }}</span></span>
@@ -65,6 +93,7 @@ function onKey(event: KeyboardEvent): void {
       type="button"
       class="btn small danger"
       :disabled="readOnly"
+      :title="readOnly ? READ_ONLY : undefined"
       @click="emit('edit', { kind: 'deleteKeys', keys: [detail.key] })"
     >
       <Icon name="trash" :size="14" /> Delete key
@@ -124,8 +153,14 @@ button.value {
   color: var(--vscode-editorWarning-foreground);
 }
 .ttl-input {
-  width: 190px;
+  width: 220px;
   height: 24px;
+}
+.ttl-input.invalid {
+  border-color: var(--vscode-inputValidation-errorBorder);
+}
+.problem {
+  color: var(--vscode-errorForeground);
 }
 .btn.small {
   height: 24px;

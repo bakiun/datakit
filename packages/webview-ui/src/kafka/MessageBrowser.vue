@@ -17,10 +17,11 @@ import { useWorkspace } from './workspace';
 
 /**
  * The messages of a topic, newest first, narrowed by filter chips. Stream adds new messages at the top as they
- * arrive; the picked message is shown in full below the table.
+ * arrive; the picked message is shown in full below the table. The page size is remembered for the data source, the
+ * filters for the topic while the workspace is open.
  */
 const props = defineProps<{ topic: KafkaTopicDetail }>();
-const emit = defineEmits<{ reproduce: [message: KafkaMessage]; sample: [message: KafkaMessage | null] }>();
+const emit = defineEmits<{ reproduce: [message: KafkaMessage]; sample: [message: KafkaMessage | null]; produce: [] }>();
 const ws = useWorkspace();
 
 const PAGE_SIZES = [100, 500, 1000];
@@ -28,12 +29,15 @@ const PAGE_SIZES = [100, 500, 1000];
 const MAX_ROWS = 1000;
 const DEBOUNCE_MS = 400;
 
-const ownSize = Math.max(PAGE_SIZES[0]!, Math.min(PAGE_SIZES[PAGE_SIZES.length - 1]!, ws.state.init!.pageSize));
+const clampSize = (n: number) => Math.max(PAGE_SIZES[0]!, Math.min(PAGE_SIZES[PAGE_SIZES.length - 1]!, n));
+const ownSize = clampSize(ws.state.init!.pageSize);
 const sizes = [...new Set([...PAGE_SIZES, ownSize])].sort((a, b) => a - b);
-const pageSize = ref(ownSize);
+const remembered = ws.state.prefs.pageSize;
+const pageSize = ref(remembered !== undefined && sizes.includes(remembered) ? remembered : ownSize);
 
-const filters = ref<MessageFilter[]>([]);
-let filterSeq = 0;
+const filters = ref<MessageFilter[]>((ws.memory.filters.get(props.topic.name) ?? []).map((f) => ({ ...f })));
+let filterSeq = Math.max(0, ...filters.value.map((f) => f.id));
+watch(filters, (list) => ws.memory.filters.set(props.topic.name, list.map((f) => ({ ...f }))), { deep: true });
 const built = computed(() => buildMessageQuery(props.topic.name, pageSize.value, props.topic.partitions, filters.value));
 const problemText = computed(() => {
   const [id, problem] = [...built.value.problems][0] ?? [];
@@ -94,7 +98,10 @@ watch(
     timer = setTimeout(() => fetch(), DEBOUNCE_MS);
   },
 );
-watch(pageSize, () => fetch());
+watch(pageSize, (size) => {
+  ws.setPrefs({ pageSize: size });
+  fetch();
+});
 
 function addFilter(event: Event): void {
   const select = event.target as HTMLSelectElement;
@@ -107,6 +114,11 @@ function addFilter(event: Event): void {
 
 function removeFilter(id: number): void {
   filters.value = filters.value.filter((f) => f.id !== id);
+  void nextTick(() => fetch());
+}
+
+function clearFilters(): void {
+  filters.value = [];
   void nextTick(() => fetch());
 }
 
@@ -226,10 +238,7 @@ const status = computed((): { text: string; tone: 'ok' | 'warn' | 'error' | 'mut
   return { text: parts.join(' · '), tone: page.value.partial || streamNote.value ? 'warn' : 'ok' };
 });
 
-const emptyText = computed(() => {
-  if (props.topic.messages === 0 && !pageFilters.value) return ws.state.init!.readOnly ? 'This topic is empty.' : 'This topic is empty. Produce a message to get started.';
-  return 'No messages match these filters.';
-});
+const emptyTopic = computed(() => props.topic.messages === 0 && !pageFilters.value);
 
 function copyAll(): void {
   ws.copy(rows.value.map(messageJson).join('\n'), plural(rows.value.length, 'message'));
@@ -310,7 +319,13 @@ function copyAll(): void {
           </tr>
         </tbody>
       </table>
-      <p v-if="page && !rows.length" class="empty-state">{{ emptyText }}</p>
+      <p v-if="page && !rows.length && emptyTopic" class="empty-state">
+        This topic is empty.
+        <button v-if="!ws.state.init!.readOnly" type="button" class="lnk" @click="emit('produce')">Produce a message</button>
+      </p>
+      <p v-else-if="page && !rows.length" class="empty-state">
+        No messages match these filters. <button type="button" class="lnk" @click="clearFilters">Remove the filters</button>
+      </p>
     </div>
     <MessagePane v-if="pickedMessage" :message="pickedMessage" @reproduce="emit('reproduce', $event)" />
   </div>

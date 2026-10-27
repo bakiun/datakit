@@ -79,3 +79,24 @@ export function insertStage(pipeline: string, stage: string): string {
   if (head.endsWith('[') || head.endsWith(',')) return `${head}\n  ${stage}\n${tail}`;
   return `${head},\n  ${stage}\n${tail}`;
 }
+
+/**
+ * The top-level fields a filter tests, without operators such as `$or`: `status` and `customer.tier` of
+ * `{ status: "paid", "customer.tier": "gold" }`. Explain offers an index on them.
+ */
+export function filterFields(filter: string): string[] {
+  const object = topLevel(filter, 'ObjectExpression');
+  const fields: string[] = [];
+  for (let property = object?.firstChild ?? null; property; property = property.nextSibling) {
+    const key = property.name === 'Property' ? property.firstChild : null;
+    if (!key || (key.name !== 'PropertyDefinition' && key.name !== 'String')) continue;
+    const name = filter.slice(key.from, key.to).replace(/^(["'])(.*)\1$/, '$2');
+    if (name && !name.startsWith('$') && !fields.includes(name)) fields.push(name);
+  }
+  return fields;
+}
+
+/** An ascending index key pattern on the fields, e.g. `{ status: 1, "customer.tier": 1 }`. */
+export function indexKeys(fields: readonly string[]): string {
+  return `{ ${fields.map((f) => `${/^[A-Za-z_$][\w$]*$/.test(f) ? f : JSON.stringify(f)}: 1`).join(', ')} }`;
+}

@@ -7,6 +7,8 @@ import {
   formatReply,
   formatServerVersion,
   planEdit,
+  readPanelRef,
+  RedisCheckError,
   redisTextLabel,
   removesData,
   splitCommandLine,
@@ -21,18 +23,21 @@ import {
   type RedisSession,
   type RedisText,
   type RedisValuePage,
+  type ScanCommand,
 } from '@datakit/core';
 import { stringify } from 'csv-stringify/sync';
 import * as vscode from 'vscode';
 import { CancelledError, errorMessage } from '../connections/prompts';
 import type { Services } from '../services';
-import { renderWebviewHtml, webviewRoot } from '../webview/webviewHtml';
+import { openWebviewPanel, renderWebviewHtml } from '../webview/webviewHtml';
 
 /** Strings are read up to this size; longer ones are shown cut short and cannot be edited here. */
 const MAX_STRING_BYTES = 1024 * 1024;
 const DEFAULT_SCAN_COUNT = 500;
 /** Items read per round when a whole value is exported. */
 const EXPORT_PAGE = 1000;
+/** globalState key: the last key list query of each data source, by id. */
+const LAST_SCAN_KEY = 'datakit.redisKeys.lastScan';
 
 const plural = (n: number, word: string) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
 
@@ -92,7 +97,13 @@ function exportRows(page: RedisValuePage): Record<string, string | number | null
  * written at once, and a CLI. It has its own session, so it can select another database than the tree.
  */
 export class RedisKeysPanel {
+  static readonly viewType = 'datakit.redisKeys';
   private static readonly panels = new Map<string, RedisKeysPanel>();
+  /**
+   * The last key list queries of this window. globalState keeps them for the next session, but right after a write
+   * it can still answer with an older value for a moment.
+   */
+  private static rememberedScans: Record<string, ScanCommand> | undefined;
   private static readonly loaded = new vscode.EventEmitter<string>();
   /** Fires with the data source id when a key browser has started; lets the tests check the whole path. */
   static readonly onDidLoad = RedisKeysPanel.loaded.event;
@@ -110,6 +121,24 @@ export class RedisKeysPanel {
     }
     existing.panel.reveal();
     if (database !== undefined && database !== existing.database) void existing.select(database);
+  }
+
+  /** Brings the data source's key browser to the front, on the database it shows; tells whether one is open. */
+  static reveal(dataSourceId: string): boolean {
+    const existing = RedisKeysPanel.panels.get(dataSourceId);
+    existing?.panel.reveal();
+    return existing !== undefined;
+  }
+
+  /**
+   * Builds the key browser again on a tab VS Code restores after a reload of the window, on the database it showed.
+   * False when the data source is gone or has a key browser open already.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.redisKeys(state);
+    if (!ref || services.store.get(ref.dataSourceId)?.engine !== 'redis' || RedisKeysPanel.panels.has(ref.dataSourceId)) return false;
+    new RedisKeysPanel(services, ref.dataSourceId, ref.database, panel);
+    return true;
   }
 
   /** Hands a message to a key browser as if its page had sent it; used by the tests. */
@@ -139,16 +168,13 @@ export class RedisKeysPanel {
     private readonly services: Services,
     private readonly dataSourceId: string,
     database: number | undefined,
+    restored?: vscode.WebviewPanel,
   ) {
     const extensionUri = services.context.extensionUri;
     this.database = database ?? (Number(this.dataSource()?.database) || 0);
-    this.panel = vscode.window.createWebviewPanel('datakit.redisKeys', this.title(), vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [webviewRoot(extensionUri)],
-    });
+    this.panel = openWebviewPanel(RedisKeysPanel.viewType, this.title(), extensionUri, restored);
     this.panel.iconPath = vscode.Uri.joinPath(extensionUri, 'media', 'icons', 'redis.svg');
-    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'redisKeys', this.title());
+    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'redisKeys', this.title(), { dataSourceId, database: this.database });
     this.panel.webview.onDidReceiveMessage((message: RedisKeysWebviewMessage) => void this.handle(message));
     this.panel.onDidChangeViewState(() => RedisKeysPanel.updateStatusBar());
     this.panel.onDidDispose(() => {
@@ -185,7 +211,7 @@ export class RedisKeysPanel {
           session.onDidClose((error) => {
             if (this.session !== opening) return;
             this.session = undefined;
-            if (error) this.post({ type: 'notice', message: `The connection was lost (${error.message}). It reconnects on the next action.` });
+            if (error) this.post({ type: 'notice', message: `The connection was lost (${error.message}). It reconnects on the next action.`, error: true });
           }),
         () => {
           if (this.session === opening) this.session = undefined;
@@ -252,6 +278,7 @@ export class RedisKeysPanel {
           databases: await session.databases(),
           pageSize: this.pageSize(),
           scanCount: this.scanCount(),
+          lastScan: this.lastScans()[this.dataSourceId] ?? null,
           fieldTtl: supportsFieldTtl(session.serverVersion),
           keepTtl: supportsKeepTtl(session.serverVersion),
         },
@@ -263,7 +290,15 @@ export class RedisKeysPanel {
     }
   }
 
+  private lastScans(): Record<string, ScanCommand> {
+    return RedisKeysPanel.rememberedScans ?? this.services.context.globalState.get<Record<string, ScanCommand>>(LAST_SCAN_KEY) ?? {};
+  }
+
   private async scan(match: string, keyType: string | null, cursor: string, count: number | null, append: boolean): Promise<void> {
+    if (!append) {
+      RedisKeysPanel.rememberedScans = { ...this.lastScans(), [this.dataSourceId]: { cursor: '0', match, type: keyType, count } };
+      void this.services.context.globalState.update(LAST_SCAN_KEY, RedisKeysPanel.rememberedScans);
+    }
     try {
       const session = await this.connect();
       const result = await session.scan(cursor, { match, type: keyType, count: count ?? this.scanCount(), want: this.pageSize() });
@@ -317,7 +352,7 @@ export class RedisKeysPanel {
     const plan = planEdit(edit);
     const commands = plan.commands.map((c) => formatCommand(c));
     if (!(await this.confirm(dataSource, edit, commands))) {
-      this.post({ type: 'writeFailed', message: 'Nothing was written.' });
+      this.post({ type: 'writeFailed', message: 'Nothing was written.', reason: 'cancelled' });
       return;
     }
     try {
@@ -328,7 +363,8 @@ export class RedisKeysPanel {
       if (next !== null) await this.open(next);
       else this.shown = undefined;
     } catch (error) {
-      this.post({ type: 'writeFailed', message: errorMessage(error) });
+      const stale = error instanceof RedisCheckError && error.check.stale;
+      this.post({ type: 'writeFailed', message: errorMessage(error), ...(stale ? { reason: 'stale' as const } : {}) });
     }
   }
 
@@ -339,7 +375,8 @@ export class RedisKeysPanel {
     if (!production && !removal) return true;
     const where = `“${dataSource.name}”${production ? ' (Production)' : ''}`;
     const from = edit.kind === 'deleteKeys' ? '' : ` from “${redisTextLabel(edit.key)}”`;
-    const title = removal ? `${describeEdit(edit).replace(/^Deleted/, 'Delete')}${from} on ${where}?` : `Write to ${where}?`;
+    const what = edit.kind === 'deleteKeys' && edit.keys.length === 1 ? `Delete the key “${redisTextLabel(edit.keys[0]!)}”` : describeEdit(edit).replace(/^Deleted/, 'Delete');
+    const title = removal ? `${what}${from} on ${where}?` : `Write to ${where}?`;
     const action = removal ? 'Delete' : 'Write';
     const choice = await vscode.window.showWarningMessage(title, { modal: true, detail: commands.slice(0, 10).join('\n') }, action);
     return choice === action;
@@ -355,7 +392,7 @@ export class RedisKeysPanel {
       this.post({ type: 'database', database, databases: await session.databases() });
       RedisKeysPanel.updateStatusBar();
     } catch (error) {
-      this.post({ type: 'notice', message: `Could not select db${database}: ${errorMessage(error)}` });
+      this.post({ type: 'notice', message: `Could not switch to db${database}: ${errorMessage(error)}`, error: true });
     }
   }
 
@@ -429,7 +466,7 @@ export class RedisKeysPanel {
       await writeFile(file.fsPath, content);
       this.post({ type: 'notice', message: `Saved ${text !== null ? 'the value' : plural(rows.length, 'row')} to ${file.path.split('/').pop()}.` });
     } catch (error) {
-      this.post({ type: 'notice', message: `Export failed: ${errorMessage(error)}` });
+      this.post({ type: 'notice', message: `Export failed: ${errorMessage(error)}`, error: true });
     }
   }
 

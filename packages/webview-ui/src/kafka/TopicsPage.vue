@@ -99,7 +99,13 @@ onMounted(() => ws.load('topics'));
         </tbody>
       </table>
       <p v-if="!s.topics" class="empty-state">{{ s.loading.topics ? 'Reading the topics…' : '' }}</p>
-      <p v-else-if="!rows.length" class="empty-state">{{ s.topics.length ? 'No topic matches the filter.' : 'The cluster has no topics yet.' }}</p>
+      <p v-else-if="!rows.length && filter.trim()" class="empty-state">
+        No topic matches the filter. <button type="button" class="lnk" @click="filter = ''">Clear the filter</button>
+      </p>
+      <p v-else-if="!rows.length" class="empty-state">
+        The cluster has no topics yet.
+        <button v-if="!readOnly" type="button" class="lnk" @click="dialog = { kind: 'create', source: null }">Create a topic</button>
+      </p>
       <p v-else-if="rows.length > shown.length" class="empty-state">Showing {{ num(shown.length) }} of {{ num(rows.length) }} topics. Filter to narrow them down.</p>
     </div>
 
@@ -120,10 +126,10 @@ onMounted(() => ws.load('topics'));
     />
     <ConfirmDialog
       v-else-if="dialog?.kind === 'delete'"
-      title="Delete topic"
+      :title="`Delete ${dialog.topic}`"
       text="Deletes the topic, all partitions and messages. Producers writing to it will fail."
       :target="dialog.topic"
-      primary="Delete"
+      primary="Delete topic"
       :action="deleteAction(dialog.topic)"
       @close="dialog = null"
     />

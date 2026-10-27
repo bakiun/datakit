@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import type { SchemaType } from '@datakit/core';
+import type { SchemaSubject, SchemaType } from '@datakit/core';
 import { computed, ref, watch } from 'vue';
 import CodeView from '../components/CodeView.vue';
 import KafkaDialog from './KafkaDialog.vue';
 import { useWorkspace } from './workspace';
 
 /**
- * Registers a schema: a new subject, or a new version of `subject` starting from its current schema. The host checks
- * compatibility with the latest version first and refuses an incompatible schema.
+ * Registers a schema: a new subject, or a new version of `subject` starting from its current schema. A new subject
+ * named like an existing one gets a new version of it. The host checks compatibility with the latest version first
+ * and refuses an incompatible schema.
  */
-const props = defineProps<{ subject: string | null; type: SchemaType; schema: string; existing: string[] }>();
+const props = defineProps<{ subject: string | null; type: SchemaType; schema: string; existing: SchemaSubject[] }>();
 const emit = defineEmits<{ close: []; registered: [subject: string] }>();
 const ws = useWorkspace();
 
@@ -32,6 +33,14 @@ const name = ref(props.subject ?? '');
 const type = ref<SchemaType>(props.type);
 const text = ref(props.subject ? props.schema : EXAMPLES[props.type]);
 
+// The subject suggestions come from the topic list.
+if (!ws.state.topics && !ws.state.loading.topics) ws.load('topics');
+/** The existing subject the typed name names; registering then adds a version of it, of its own type. */
+const known = computed(() => (props.subject ? null : (props.existing.find((x) => x.name === name.value.trim()) ?? null)));
+watch(known, (subject) => {
+  if (subject) type.value = subject.type;
+});
+
 // A new subject starts from an example of its type; an untouched example follows the type.
 watch(type, (now, before) => {
   if (!props.subject && text.value === EXAMPLES[before]) text.value = EXAMPLES[now];
@@ -41,7 +50,6 @@ const problem = computed(() => {
   if (!props.subject) {
     const n = name.value.trim();
     if (!n) return 'Name the subject, e.g. orders.refunded-value.';
-    if (props.existing.includes(n)) return 'This subject exists; open it and register a new version instead.';
   }
   if (!text.value.trim()) return 'Write the schema.';
   if (type.value !== 'PROTOBUF') {
@@ -68,7 +76,7 @@ async function register() {
 <template>
   <KafkaDialog
     :title="subject ? `New version of ${subject}` : 'New schema'"
-    :primary="subject ? 'Register version' : 'Register schema'"
+    :primary="subject || known ? 'Register version' : 'Register schema'"
     :disabled="!!problem"
     :action="register"
     wide
@@ -84,12 +92,13 @@ async function register() {
       </label>
       <label class="field">
         Type
-        <select v-model="type" class="fld" :disabled="!!subject">
+        <select v-model="type" class="fld" :disabled="!!subject || !!known">
           <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
         </select>
       </label>
     </div>
     <span v-if="subject" class="note">Starts from the current version. Compatibility is checked before the new version is registered.</span>
+    <span v-else-if="known" class="note">{{ known.name }} exists; this registers version {{ known.latestVersion + 1 }} after checking compatibility.</span>
     <div class="editor">
       <CodeView v-model="text" :language="type === 'PROTOBUF' ? 'text' : 'json'" label="Schema" />
     </div>

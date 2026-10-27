@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import ModalDialog from '../components/ModalDialog.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import { useCollection } from './collection';
-import { MOD_KEY } from './format';
 import ShellCode from './ShellCode.vue';
 
 /** Inserts one document, or an array of them, typed in shell syntax; also used to insert a copy of a document. */
@@ -11,7 +11,6 @@ const emit = defineEmits<{ close: [] }>();
 const col = useCollection();
 
 const draft = ref(props.text);
-const dialog = ref<InstanceType<typeof ModalDialog>>();
 /** Starts inside the braces of the empty document. */
 const start = props.text.indexOf('\n  ') >= 0 ? props.text.indexOf('\n  ') + 3 : props.text.length;
 const editor = ref<InstanceType<typeof ShellCode>>();
@@ -22,13 +21,13 @@ const insert = () => col.write({ kind: 'insert', text: draft.value }, { quiet: t
 </script>
 
 <template>
-  <ModalDialog ref="dialog" :title="title" primary="Insert" :disabled="!draft.trim()" :action="insert" wide @close="emit('close')">
+  <ModalDialog :title="title" primary="Insert" :disabled="!draft.trim()" :action="insert" wide @close="emit('close')">
     <div class="code-box editor">
-      <ShellCode ref="editor" v-model="draft" label="Document to insert, in shell syntax" @run="dialog?.submit()" />
+      <ShellCode ref="editor" v-model="draft" label="Document to insert, in shell syntax" />
     </div>
     <p class="hint">
       One document, or an array of documents. Values in shell syntax: <span class="mono">ObjectId("…")</span>, <span class="mono">ISODate("…")</span>,
-      <span class="mono">NumberDecimal("…")</span>. Without an <span class="mono">_id</span> the server adds one. {{ MOD_KEY }}+Enter inserts.
+      <span class="mono">NumberDecimal("…")</span>. Without an <span class="mono">_id</span> the server adds one. {{ SUBMIT_KEY }} inserts.
     </p>
   </ModalDialog>
 </template>

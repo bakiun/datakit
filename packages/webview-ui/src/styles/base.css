@@ -144,7 +144,8 @@ select.fld {
   background: var(--vscode-toolbar-hoverBackground);
 }
 
-.check {
+/* A checkbox with its label. Only on labels: grids use `check` on table cells, which flex would take out of the table. */
+label.check {
   display: flex;
   align-items: center;
   gap: 8px;

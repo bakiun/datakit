@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   buildChanges,
   changesData,
@@ -25,7 +25,7 @@ import {
 import * as vscode from 'vscode';
 import { CancelledError, errorMessage } from '../connections/prompts';
 import type { Services } from '../services';
-import { renderWebviewHtml, webviewRoot } from '../webview/webviewHtml';
+import { openWebviewPanel, renderWebviewHtml } from '../webview/webviewHtml';
 import { EXPORT_EXTENSIONS, EXPORT_FILTERS, openExport, writeExport } from './exports';
 import { toCellValue } from './values';
 
@@ -46,8 +46,17 @@ interface Page {
 
 export type Rows = Extract<StatementResult, { kind: 'rows' }>;
 
+/** The export format and rows picked last, and the folder exported to last, shared by all SQL views. */
+const EXPORT_KEY = 'datakit.sql.export';
+const EXPORT_FOLDER_KEY = 'datakit.sql.exportFolder';
+/** Followed by the data source id: the page size picked in the grid last, and the data source's setting then. */
+const PAGE_SIZE_KEY = 'datakit.sql.pageSize';
+
 export const seconds = (ms: number) => `${(ms / 1000).toFixed(4)} s`;
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+/** The view's session could not be opened: the server is unreachable, the password is wrong and the like. */
+class ConnectionError extends Error {}
+
 /** MySQL reports a stopped query as interrupted, PostgreSQL as cancelled. */
 const isInterrupted = (error: unknown) => /interrupted|canceling statement due to user request/i.test(errorMessage(error));
 
@@ -92,22 +101,27 @@ export abstract class SqlViewPanel {
   protected autoCommit = true;
   private changesInTransaction = 0;
   private firstPageShown = false;
+  /** The tab came back after a reload of the window, and its page has not been started yet. */
+  private restoring: boolean;
 
+  /**
+   * `ref` says which panel this is (e.g. the data source and table) for the serializer; `restored` is the panel VS
+   * Code restored after a reload of the window.
+   */
   protected constructor(
     protected readonly services: Services,
     readonly dataSourceId: string,
     view: 'tableData' | 'queryConsole',
     title: string,
     icon: string,
+    ref: object,
+    restored?: vscode.WebviewPanel,
   ) {
     const extensionUri = services.context.extensionUri;
-    this.panel = vscode.window.createWebviewPanel(`datakit.${view}`, title, vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [webviewRoot(extensionUri)],
-    });
+    this.restoring = restored !== undefined;
+    this.panel = openWebviewPanel(`datakit.${view}`, title, extensionUri, restored);
     this.panel.iconPath = vscode.Uri.joinPath(extensionUri, 'media', 'icons', icon);
-    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, view, title);
+    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, view, title, ref);
     this.panel.webview.onDidReceiveMessage((message: TableDataWebviewMessage) => void this.handle(message));
     this.panel.onDidChangeViewState(() => SqlViewPanel.updateStatusBar());
     this.panel.onDidDispose(() => {
@@ -150,7 +164,28 @@ export abstract class SqlViewPanel {
     return this.services.store.get(this.dataSourceId);
   }
 
+  /**
+   * The page size the views of a data source open with: the one picked in the grid last, unless the data source's
+   * setting changed since, which then wins.
+   */
+  protected pageSize(dataSource: DataSource): number {
+    const picked = this.services.context.globalState.get<{ size: number; setting: number }>(`${PAGE_SIZE_KEY}.${dataSource.id}`);
+    return picked && picked.setting === dataSource.options.pageSize ? picked.size : dataSource.options.pageSize;
+  }
+
+  /** The export format and rows the user picked last. */
+  protected exportChoice(): { exportFormat: ExportFormat; exportScope: ExportScope } {
+    const saved = this.services.context.globalState.get<{ format: ExportFormat; scope: ExportScope }>(EXPORT_KEY);
+    return { exportFormat: saved?.format ?? 'csv', exportScope: saved?.scope ?? 'page' };
+  }
+
+  /** The text shown for a failed statement; a view can add the next step to it. */
+  protected errorText(error: unknown): string {
+    return error instanceof ConnectionError ? `Could not connect to “${this.dataSource()?.name ?? 'the data source'}”: ${error.message}` : errorMessage(error);
+  }
+
   protected post(message: TableDataHostMessage): void {
+    if (message.type === 'init') this.restoring = false;
     void this.panel.webview.postMessage(message);
     this.posted(message);
   }
@@ -170,6 +205,8 @@ export abstract class SqlViewPanel {
           await session.close();
           throw error;
         }
+      }, (error: unknown) => {
+        throw error instanceof CancelledError ? error : new ConnectionError(errorMessage(error));
       });
       this.session = opening;
       opening.then(
@@ -229,8 +266,17 @@ export abstract class SqlViewPanel {
     this.log(level, message);
   }
 
+  /**
+   * A failure to connect says so and lets the page offer the data source's settings next to Retry. A tab restored
+   * after a reload of the window whose table or database is gone closes instead, without a word.
+   */
   protected initFailed(error: unknown): void {
-    this.post({ type: 'initFailed', message: error instanceof CancelledError ? 'Connecting was cancelled.' : errorMessage(error) });
+    if (this.restoring && /\bdoes not exist\b/i.test(errorMessage(error))) {
+      this.panel.dispose();
+      return;
+    }
+    if (error instanceof CancelledError) this.post({ type: 'initFailed', message: 'Connecting was cancelled.' });
+    else this.post({ type: 'initFailed', message: this.errorText(error), ...(error instanceof ConnectionError ? { connection: true } : {}) });
   }
 
   /** Handles a message as if the page had sent it; the tests drive the views through it. */
@@ -251,7 +297,15 @@ export abstract class SqlViewPanel {
       case 'stop':
         return this.stop();
       case 'export':
+        void this.services.context.globalState.update(EXPORT_KEY, { format: message.format, scope: message.scope });
         return this.export(message.format, message.scope);
+      case 'pageSize': {
+        const dataSource = this.dataSource();
+        if (dataSource) {
+          await this.services.context.globalState.update(`${PAGE_SIZE_KEY}.${dataSource.id}`, { size: message.pageSize, setting: dataSource.options.pageSize });
+        }
+        return;
+      }
       case 'copySql':
         await vscode.env.clipboard.writeText(message.sql);
         this.post({ type: 'notice', message: 'Copied to the clipboard.' });
@@ -259,6 +313,9 @@ export abstract class SqlViewPanel {
       case 'txMode':
         this.autoCommit = message.autoCommit;
         SqlViewPanel.updateStatusBar();
+        return;
+      case 'editDataSource':
+        await vscode.commands.executeCommand('datakit.editDataSource', this.dataSourceId);
         return;
       default:
         return this.handleOwn(message);
@@ -274,14 +331,19 @@ export abstract class SqlViewPanel {
       session = await this.connect();
       const dialect = session.dialect;
       const writes = statements.filter((s) => changesData(s.text, dialect));
-      if (writes.length && dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, writes.map((s) => s.text)))) {
-        this.post({ type: 'runFailed', message: 'Nothing was run.' });
+      const what = writes.length === 1 ? 'a statement that changes data' : `${writes.length} statements that change data`;
+      if (writes.length && dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, writes.map((s) => s.text), { verb: 'Run', what }))) {
+        this.post({ type: 'declined', message: 'Nothing was run.' });
         this.log('warning', 'Nothing was run: the production confirmation was declined.');
         return;
       }
       if (!autoCommit && writes.length && !session.inTransaction) await session.begin();
     } catch (error) {
-      this.post({ type: 'runFailed', message: errorMessage(error) });
+      if (error instanceof CancelledError) {
+        this.post({ type: 'declined', message: 'Nothing was run.' });
+        return;
+      }
+      this.post({ type: 'runFailed', message: this.errorText(error) });
       this.log('error', errorMessage(error));
       return;
     }
@@ -296,7 +358,7 @@ export abstract class SqlViewPanel {
         try {
           result = await session.execute(statement.text);
         } catch (error) {
-          const message = isInterrupted(error) ? 'Query stopped.' : `${statements.length > 1 ? `${where} failed: ` : ''}${errorMessage(error)}`;
+          const message = isInterrupted(error) ? 'Query stopped.' : `${statements.length > 1 ? `${where} failed: ` : ''}${this.errorText(error)}`;
           this.post({
             type: 'runFailed',
             message,
@@ -346,7 +408,8 @@ export abstract class SqlViewPanel {
       if (result.kind !== 'rows') this.post({ type: 'ran', summary: `${plural(result.affectedRows, 'row')} affected` });
       else await this.show(session, statement, result, summary);
     } catch (error) {
-      this.post({ type: 'runFailed', message: isInterrupted(error) ? 'Query stopped.' : errorMessage(error) });
+      if (error instanceof CancelledError) this.post({ type: 'declined', message: 'Nothing was run.' });
+      else this.post({ type: 'runFailed', message: isInterrupted(error) ? 'Query stopped.' : this.errorText(error) });
     } finally {
       this.running = false;
     }
@@ -427,8 +490,9 @@ export abstract class SqlViewPanel {
     const statements = buildChanges(target.structure, mapped, (row) => target.keyIndexes.map((i) => page.rows[row]?.[i]));
     try {
       const session = await this.connect();
-      if (dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, statements.map((s) => session.format(s)), changes))) {
-        this.post({ type: 'submitFailed', message: 'Nothing was written.' });
+      const ask = { verb: 'Write', what: plural(changes.length, 'row change'), detail: describeChanges(changes) };
+      if (dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, statements.map((s) => session.format(s)), ask))) {
+        this.post({ type: 'declined', message: 'Nothing was written.' });
         return;
       }
       const started = performance.now();
@@ -440,7 +504,11 @@ export abstract class SqlViewPanel {
       this.log('ok', summary);
       await this.query(statement, summary);
     } catch (error) {
-      this.post({ type: 'submitFailed', message: errorMessage(error) });
+      if (error instanceof CancelledError) {
+        this.post({ type: 'declined', message: 'Nothing was written.' });
+        return;
+      }
+      this.post({ type: 'submitFailed', message: this.errorText(error) });
       this.log('error', `Not written: ${errorMessage(error)}`);
     }
   }
@@ -450,17 +518,19 @@ export abstract class SqlViewPanel {
     return session.write(statements, autoCommit && !session.inTransaction);
   }
 
-  protected async confirmProduction(dataSource: DataSource, statements: string[], changes?: TableChange[]): Promise<boolean> {
+  /**
+   * Asks before anything is changed on a production data source: “<verb> <what> on “name” (Production)?”, with the
+   * statements below and a button named after the verb.
+   */
+  protected async confirmProduction(dataSource: DataSource, statements: string[], ask: { verb: string; what: string; detail?: string }): Promise<boolean> {
     const preview = statements.slice(0, 10).map((s) => `${s.length > 300 ? `${s.slice(0, 300)}…` : s};`);
     if (statements.length > preview.length) preview.push(`… and ${statements.length - preview.length} more`);
-    const action = changes ? 'Write' : 'Run';
-    const what = changes ? describeChanges(changes) : plural(statements.length, 'statement that changes data');
     const choice = await vscode.window.showWarningMessage(
-      `${action} ${what} on “${dataSource.name}” (Production)?`,
-      { modal: true, detail: preview.join('\n') },
-      action,
+      `${ask.verb} ${ask.what} on “${dataSource.name}” (Production)?`,
+      { modal: true, detail: [ask.detail, preview.join('\n')].filter(Boolean).join('\n\n') },
+      ask.verb,
     );
-    return choice === action;
+    return choice === ask.verb;
   }
 
   private postTransaction(session: SqlSession): void {
@@ -500,13 +570,16 @@ export abstract class SqlViewPanel {
     const page = this.page;
     if (!page) return;
     const table = page.target?.structure.table ?? page.fields.find((f) => f.source)?.source?.table ?? this.exportName();
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
+    const state = this.services.context.globalState;
+    // The folder exported to last, so a series of exports needs no browsing.
+    const folder = state.get<string>(EXPORT_FOLDER_KEY) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
     const file = await vscode.window.showSaveDialog({
       title: scope === 'all' ? 'Export All Rows' : 'Export Rows',
       defaultUri: vscode.Uri.file(join(folder, `${table}.${EXPORT_EXTENSIONS[format]}`)),
       filters: EXPORT_FILTERS[format],
     });
     if (!file) return;
+    if (file.scheme === 'file') void state.update(EXPORT_FOLDER_KEY, dirname(file.fsPath));
     const name = file.path.split('/').pop();
     const generated = new Set(page.target?.structure.columns.filter((c) => c.generated).map((c) => c.name) ?? []);
     try {

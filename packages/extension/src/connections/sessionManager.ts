@@ -13,7 +13,7 @@ import {
 import * as vscode from 'vscode';
 import type { DataSourceStore } from './dataSourceStore';
 import { driverFor } from './drivers';
-import { CancelledError, errorMessage, promptForSecret } from './prompts';
+import { CancelledError, errorMessage, promptForSecret, showConnectionError } from './prompts';
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'failed';
 
@@ -42,6 +42,11 @@ interface Entry {
   session?: ServerSession;
   pending?: Promise<ServerSession>;
   error?: string;
+  /**
+   * Passwords the open session was given that the data source does not save, e.g. with “Save: Never”. They stay in
+   * memory while it is connected, so its other sessions and a refresh do not ask again.
+   */
+  typed?: Secrets;
 }
 
 function update(entry: Entry, patch: Partial<Entry>): void {
@@ -100,7 +105,11 @@ export class SessionManager implements vscode.Disposable {
     if (entry.session) return Promise.resolve(entry.session);
     if (entry.pending) return entry.pending;
 
-    const pending = this.open(id, overrides);
+    let typed: Secrets = {};
+    const pending = this.openWithSecrets(id, overrides).then((opened) => {
+      typed = opened.typed;
+      return opened.session;
+    });
     update(entry, { pending, status: 'connecting', error: undefined });
     this.changed.fire(id);
     pending.then(
@@ -109,11 +118,11 @@ export class SessionManager implements vscode.Disposable {
           void session.close(); // disconnected while connecting
           return;
         }
-        update(entry, { pending: undefined, session, status: 'connected' });
+        update(entry, { pending: undefined, session, status: 'connected', typed });
         session.onDidClose((error) => {
           if (entry.session !== session) return;
           this.closeDatabaseSessions(id);
-          update(entry, { session: undefined, status: error ? 'failed' : 'idle', error: error?.message });
+          update(entry, { session: undefined, status: error ? 'failed' : 'idle', error: error?.message, typed: undefined });
           this.changed.fire(id);
         });
         this.changed.fire(id);
@@ -133,7 +142,7 @@ export class SessionManager implements vscode.Disposable {
     const entry = this.entries.get(id);
     if (!entry || entry.status === 'idle') return;
     const session = entry.session;
-    update(entry, { session: undefined, pending: undefined, status: 'idle', error: undefined });
+    update(entry, { session: undefined, pending: undefined, status: 'idle', error: undefined, typed: undefined });
     this.changed.fire(id);
     await session?.close();
   }
@@ -184,18 +193,17 @@ export class SessionManager implements vscode.Disposable {
     return asKafka(await this.connect(id));
   }
 
+  /** Reconnects with the passwords the old session was given, unless `overrides` replaces them. */
   async reconnect(id: string, overrides?: Secrets): Promise<ServerSession> {
+    const kept = this.entries.get(id)?.typed;
     await this.disconnect(id);
-    return this.connect(id, overrides);
+    return this.connect(id, { ...kept, ...overrides });
   }
 
   /** Connects the data sources marked “Connect when VS Code starts”. */
   connectOnStartup(): void {
     for (const dataSource of this.store.list().filter((d) => d.options.autoConnect)) {
-      this.connect(dataSource.id).catch((error: unknown) => {
-        if (error instanceof CancelledError) return;
-        void vscode.window.showErrorMessage(`Could not connect to “${dataSource.name}”: ${errorMessage(error)}`);
-      });
+      this.connect(dataSource.id).catch((error: unknown) => showConnectionError(dataSource, error));
     }
   }
 
@@ -221,15 +229,26 @@ export class SessionManager implements vscode.Disposable {
   }
 
   private async open(id: string, overrides: Secrets, database?: string): Promise<ServerSession> {
+    return (await this.openWithSecrets(id, overrides, database)).session;
+  }
+
+  /**
+   * Opens a session; a connected data source lends it the passwords its own session was given. Returns the
+   * passwords that are not saved: those passed in and those the user typed.
+   */
+  private async openWithSecrets(id: string, overrides: Secrets, database?: string): Promise<{ session: ServerSession; typed: Secrets }> {
     const dataSource: DataSource | undefined = this.store.get(id);
     if (!dataSource) throw new Error('The data source no longer exists.');
-    const { secrets, typed } = await resolveSecrets(dataSource, await this.store.secrets(dataSource), overrides);
+    const entry = this.entries.get(id);
+    const lent = entry?.status === 'connected' ? entry.typed : undefined;
+    const given: Secrets = { ...lent, ...overrides };
+    const { secrets, typed } = await resolveSecrets(dataSource, await this.store.secrets(dataSource), given);
     const session = await driverFor(dataSource.engine).open(database === undefined ? dataSource : { ...dataSource, database }, secrets);
     // Typed passwords are kept only once they have worked.
     for (const key of ['password', 'sshPassword'] as const) {
       if (typed[key] !== undefined) await this.store.rememberPassword(dataSource, key, typed[key]);
     }
-    return session;
+    return { session, typed: { ...given, ...typed } };
   }
 
   private entry(id: string): Entry {

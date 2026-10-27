@@ -2,13 +2,15 @@
 import type { MongoFieldStats } from '@datakit/core';
 import { computed, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
+import IconButton from '../components/IconButton.vue';
 import { useCollection } from './collection';
 import { num, percent, plural, splitPath, typeChartColor } from './format';
 import ShellText from './ShellText.vue';
 
 /**
  * The fields of a sample of documents: their types, how many documents have them and a few example values. The
- * analysis runs when the tab is first shown and again on Analyze; a write afterwards only says it may be out of date.
+ * analysis runs when the tab is shown and the documents changed since the last one, when the sample size changes
+ * (which is remembered for the next tab), and on Sample again.
  */
 const props = defineProps<{ active: boolean }>();
 const col = useCollection();
@@ -24,15 +26,19 @@ function analyze(): void {
   col.load('schema', sample.value);
 }
 
+// Writes from any tab or the shell: the sample is read again when the tab is shown.
 watch(
-  () => props.active,
-  (active) => {
-    if (active && !s.schema && !s.loading.schema) analyze();
+  () => [props.active, s.documentsVersion] as const,
+  ([active, version]) => {
+    if (active && !s.loading.schema && (!s.schema || analyzedAt.value !== version)) analyze();
   },
   { immediate: true },
 );
 
-const stale = computed(() => !!s.schema && !s.loading.schema && analyzedAt.value !== s.documentsVersion);
+watch(sample, (n) => {
+  col.remember({ schemaSample: n });
+  analyze();
+});
 
 interface Row {
   stats: MongoFieldStats;
@@ -75,10 +81,9 @@ const rows = computed((): Row[] => {
           <option v-for="n in SAMPLES" :key="n" :value="n">{{ num(n) }} documents</option>
         </select>
       </label>
-      <button type="button" class="btn sm btn-primary" :disabled="s.loading.schema" @click="analyze">{{ s.loading.schema ? 'Analyzing…' : 'Analyze' }}</button>
+      <IconButton icon="reload" label="Sample again: $sample picks other documents each time" :disabled="s.loading.schema" @click="analyze" />
     </div>
     <p v-if="s.errors.schema" class="error-line pad" role="alert"><Icon name="error" :size="14" /> {{ s.errors.schema }}</p>
-    <p v-else-if="stale" class="warn-line pad">Documents changed since this analysis. Analyze again to see the current fields.</p>
     <div v-if="s.schema" class="table-box list" :class="{ dim: s.loading.schema }">
       <table class="grid">
         <thead>

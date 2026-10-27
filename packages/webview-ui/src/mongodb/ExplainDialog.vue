@@ -6,11 +6,23 @@ import ModalDialog from '../components/ModalDialog.vue';
 import { useCollection, type ExplainView } from './collection';
 import { num } from './format';
 import ShellCode from './ShellCode.vue';
+import { indexKeys } from './shellSyntax';
 
-/** How the server runs a find or a pipeline: the winning plan's stages, the index it uses, what it read, and the full output. */
+/**
+ * How the server runs a find or a pipeline: the winning plan's stages, the index it uses, what it read, and the full
+ * output. A find that reads every document can go on to Create index, with the fields of its filter.
+ */
 const props = defineProps<{ view: ExplainView }>();
 const emit = defineEmits<{ close: [] }>();
 const col = useCollection();
+
+const canIndex = computed(() => col.canWrite.value && props.view.fields.length > 0 && !!props.view.explain && !props.view.explain.index);
+
+function createIndex(): void {
+  col.state.createIndex = { keys: indexKeys(props.view.fields) };
+  col.state.tab = 'indexes';
+  emit('close');
+}
 
 const e = computed(() => props.view.explain);
 /** Documents read per document returned; a high ratio means the query reads far more than it needs. */
@@ -47,6 +59,7 @@ const facts = computed(() => {
       </p>
       <p v-else class="warn-line index">
         <Icon name="info" :size="14" /> COLLSCAN: no index is used, so the server reads every document of the collection.
+        <button v-if="canIndex" type="button" class="lnk" :title="`Create an index on ${view.fields.join(', ')}`" @click="createIndex">Create index…</button>
       </p>
       <dl class="facts">
         <div v-for="f in facts" :key="f.label" class="fact">

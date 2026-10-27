@@ -86,10 +86,10 @@ onUnmounted(stop);
   </KafkaDialog>
   <ConfirmDialog
     v-if="deleting && name"
-    title="Delete connector"
+    :title="`Delete ${name}`"
     text="Deletes the connector and stops its tasks. Its offsets stay in the Connect offsets topic."
     :target="name"
-    primary="Delete"
+    primary="Delete connector"
     :action="remove"
     @close="deleting = false"
   />

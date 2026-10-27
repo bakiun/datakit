@@ -1,16 +1,18 @@
-import type {
-  MongoBsonType,
-  MongoCollectionHostMessage,
-  MongoCollectionInfo,
-  MongoCollectionWebviewMessage,
-  MongoDocument,
-  MongoEdit,
-  MongoExplain,
-  MongoFieldStats,
-  MongoFindQuery,
-  MongoIndex,
-  MongoSchema,
-  MongoWriteResult,
+import {
+  DEFAULT_MONGO_COLLECTION_PREFS,
+  type MongoBsonType,
+  type MongoCollectionHostMessage,
+  type MongoCollectionInfo,
+  type MongoCollectionPrefs,
+  type MongoCollectionWebviewMessage,
+  type MongoDocument,
+  type MongoEdit,
+  type MongoExplain,
+  type MongoFieldStats,
+  type MongoFindQuery,
+  type MongoIndex,
+  type MongoSchema,
+  type MongoWriteResult,
 } from '@datakit/core';
 
 /**
@@ -18,7 +20,8 @@ import type {
  * memory. Texts the page sends are read with `new Function` (dev only), so filters, documents and shell lines may
  * use `ObjectId()`, `ISODate()`, `NumberDecimal()` and `NumberLong()`. Filters understand equality, `$gt`-style
  * comparisons, `$in`, `$exists`, `$regex`, `$and` and `$or`; pipelines `$match`, `$project`, `$group`, `$sort`,
- * `$limit`, `$skip`, `$unwind`, `$lookup` (empty) and `$count`. A text containing `fail` fails.
+ * `$limit`, `$skip`, `$unwind`, `$lookup` (empty) and `$count`; `$out` and `$merge` (shell only) end the pipeline as
+ * if they wrote. A text containing `fail` fails. Remembered choices (`remember`) are kept in localStorage.
  * Query: `&readonly`, `&production`, `&view-collection` (a view on orders), `&capped`, `&initfail`, `&nocount`
  * (counts come back unknown).
  */
@@ -369,6 +372,10 @@ function runPipeline(source: Doc[], stages: unknown): Doc[] {
       }
       case '$lookup':
         docs = docs.map((d) => ({ ...d, [String((arg as Doc).as ?? 'joined')]: [] }));
+        break;
+      case '$out':
+      case '$merge':
+        docs = [];
         break;
       default:
         throw new Error(`Unrecognized pipeline stage name: '${op}'`);
@@ -815,8 +822,9 @@ export function installMongoCollectionHost(reply: (message: MongoCollectionHostM
               collection: isView ? 'paid_orders' : 'orders',
               type: isView ? 'view' : 'collection',
               readOnly,
-              pageSize: 50,
+              pageSize: Number(localStorage.getItem('mongoPageSize')) || 50,
               info: info(),
+              prefs: { ...DEFAULT_MONGO_COLLECTION_PREFS, ...(JSON.parse(localStorage.getItem('mongoPrefs') ?? '{}') as Partial<MongoCollectionPrefs>) },
             },
           },
           150,
@@ -873,8 +881,15 @@ export function installMongoCollectionHost(reply: (message: MongoCollectionHostM
         reply({ type: 'notice', message: `Saved the matching documents as ${msg.format.toUpperCase()} (dev host).` }, 300);
         break;
       case 'copy':
-        reply({ type: 'notice', message: `Copied ${msg.what} to the clipboard.` });
+        // The extension says so in VS Code's status bar.
+        console.info(`[dev host] status bar: Copied ${msg.what} to the clipboard.`);
         break;
+      case 'remember': {
+        const { pageSize, ...prefs } = msg.prefs;
+        if (pageSize) localStorage.setItem('mongoPageSize', String(pageSize));
+        localStorage.setItem('mongoPrefs', JSON.stringify({ ...(JSON.parse(localStorage.getItem('mongoPrefs') ?? '{}') as object), ...prefs }));
+        break;
+      }
     }
   };
 }

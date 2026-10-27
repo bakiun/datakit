@@ -6,6 +6,7 @@ import {
   queryTimeoutSeconds,
   shortServerVersion,
   splitSqlStatements,
+  suggestDataSourceName,
   toSettings,
 } from '../src';
 
@@ -38,6 +39,19 @@ describe('settings helpers', () => {
   it('shortens server versions', () => {
     expect(shortServerVersion({ product: 'MySQL', version: '8.0.36' })).toBe('mysql 8.0');
     expect(shortServerVersion({ product: 'MariaDB', version: '11' })).toBe('mariadb 11');
+  });
+
+  it('suggests a unique name from the database and host', () => {
+    const mysql = { ...createDataSourceSettings('mysql'), host: 'db.internal', database: 'shop' };
+    expect(suggestDataSourceName(mysql, [])).toBe('shop@db.internal');
+    expect(suggestDataSourceName({ ...mysql, database: ' ' }, [])).toBe('db.internal');
+    expect(suggestDataSourceName(mysql, ['Shop@db.internal', 'shop@db.internal 2'])).toBe('shop@db.internal 3');
+    expect(suggestDataSourceName({ ...mysql, host: '' }, [])).toBe('MySQL');
+    expect(suggestDataSourceName(createDataSourceSettings('redis'), [])).toBe('localhost');
+    const kafka = createDataSourceSettings('kafka');
+    kafka.kafka.bootstrapServers = '[::1]:9092, broker-2:9092';
+    expect(suggestDataSourceName(kafka, [])).toBe('::1');
+    expect(suggestDataSourceName(createDataSourceSettings('mongodb'), ['localhost'])).toBe('localhost 2');
   });
 });
 

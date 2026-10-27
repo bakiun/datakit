@@ -64,7 +64,7 @@ suite('Table data view', () => {
   }
 
   async function run(script: ScriptStatement[], autoCommit = true) {
-    return send({ type: 'run', statements: script, autoCommit }, 'page', 'ran', 'runFailed');
+    return send({ type: 'run', statements: script, autoCommit }, 'page', 'ran', 'runFailed', 'declined');
   }
 
   async function show(text = PAGED, unpaged = ALL): Promise<{ page: LoadedPage; summary?: string }> {
@@ -74,7 +74,7 @@ suite('Table data view', () => {
   }
 
   async function submit(changes: TableChange[], page: LoadedPage, autoCommit = true) {
-    return send({ type: 'submit', changes, autoCommit, statement: page.statement }, 'page', 'submitFailed');
+    return send({ type: 'submit', changes, autoCommit, statement: page.statement }, 'page', 'submitFailed', 'declined');
   }
 
   const column = (page: LoadedPage, name: string) => page.columns.findIndex((c) => c.name === name);
@@ -231,16 +231,16 @@ suite('Table data view', () => {
   /** Applies ALTER TABLE statements; on success the host also runs the shown query again. */
   async function alter(statements: string[]) {
     let refreshed: Promise<unknown> = Promise.resolve();
-    const reply = await new Promise<Reply<'structure' | 'alterFailed'>>((resolve) => {
+    const reply = await new Promise<Reply<'structure' | 'alterFailed' | 'declined'>>((resolve) => {
       const listener = api.onDidPostTableData((posted) => {
-        if (posted.message.type !== 'structure' && posted.message.type !== 'alterFailed') return;
+        if (posted.message.type !== 'structure' && posted.message.type !== 'alterFailed' && posted.message.type !== 'declined') return;
         listener.dispose();
         if (posted.message.type === 'structure') {
           refreshed = new Promise((done) => {
             const next = api.onDidPostTableData((p) => p.message.type === 'page' && (next.dispose(), done(undefined)));
           });
         }
-        resolve(posted.message as Reply<'structure' | 'alterFailed'>);
+        resolve(posted.message as Reply<'structure' | 'alterFailed' | 'declined'>);
       });
       void api.sendToTableData(ref, { type: 'alterTable', statements });
     });
@@ -287,12 +287,13 @@ suite('Table data view', () => {
     const dataSource = api.store.get(ref.dataSourceId)!;
     await api.store.save(dataSource.id, { ...dataSource, environment: 'production' }, {});
     const { page } = await show();
+    // Declining is not an error: the page only stops waiting.
     const refused = await stubbing('showWarningMessage', undefined, () => run(statements('DELETE FROM shop.customers WHERE id = 3')));
-    assert.deepEqual(refused, { type: 'runFailed', message: 'Nothing was run.' });
+    assert.deepEqual(refused, { type: 'declined', message: 'Nothing was run.' });
     const failed = await stubbing('showWarningMessage', undefined, () => submit([{ kind: 'delete', row: 0 }], page));
-    assert.deepEqual(failed, { type: 'submitFailed', message: 'Nothing was written.' });
+    assert.deepEqual(failed, { type: 'declined', message: 'Nothing was written.' });
     const altered = await stubbing('showWarningMessage', undefined, () => alter(['ALTER TABLE `shop`.`customers`\n  ADD COLUMN `x` int NULL']));
-    assert.deepEqual(altered, { type: 'alterFailed', message: 'Nothing was changed.' });
+    assert.deepEqual(altered, { type: 'declined', message: 'Nothing was changed.' });
     const reads = await stubbing('showWarningMessage', undefined, () => run(statements(ALL)));
     assert.equal(reads.type, 'page', 'queries run without asking');
     assert.equal((await show()).page.total, 3);

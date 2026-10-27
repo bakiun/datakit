@@ -2,6 +2,7 @@ import {
   buildSelect,
   formatServerVersion,
   hasTransactionalDdl,
+  readPanelRef,
   tableNamespace,
   type TableDataHostMessage,
   type TableDataWebviewMessage,
@@ -25,6 +26,7 @@ const EDITOR_HEIGHT_KEY = 'datakit.dataView.editorHeight';
 
 /** The data view of a table: a SQL script whose last query fills the grid, the Structure tab, edits and exports. */
 export class TableDataPanel extends SqlViewPanel {
+  static readonly viewType = 'datakit.tableData';
   private static readonly panels = new Map<string, TableDataPanel>();
   private static readonly loaded = new vscode.EventEmitter<TableRef>();
   /** Fires when a data view has shown its first page; lets the tests check the whole path. */
@@ -37,6 +39,18 @@ export class TableDataPanel extends SqlViewPanel {
     const existing = TableDataPanel.panels.get(TableDataPanel.key(ref));
     if (existing) existing.panel.reveal();
     else new TableDataPanel(services, ref);
+  }
+
+  /**
+   * Builds the data view again on a tab VS Code restores after a reload of the window. False when the data source is
+   * gone or the table already has a view open; a table that is gone closes the tab once the view looks for it.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.tableData(state);
+    const dataSource = ref && services.store.get(ref.dataSourceId);
+    if (!ref || (dataSource?.engine !== 'mysql' && dataSource?.engine !== 'postgres') || TableDataPanel.panels.has(TableDataPanel.key(ref))) return false;
+    new TableDataPanel(services, ref, panel);
+    return true;
   }
 
   /** Hands a message to a data view as if its page had sent it; used by the tests. */
@@ -53,8 +67,9 @@ export class TableDataPanel extends SqlViewPanel {
   private constructor(
     services: Services,
     private readonly ref: TableRef,
+    restored?: vscode.WebviewPanel,
   ) {
-    super(services, ref.dataSourceId, 'tableData', `${ref.table} · ${services.store.get(ref.dataSourceId)?.name ?? ''}`, 'table.svg');
+    super(services, ref.dataSourceId, 'tableData', `${ref.table} · ${services.store.get(ref.dataSourceId)?.name ?? ''}`, 'table.svg', ref, restored);
     TableDataPanel.panels.set(TableDataPanel.key(ref), this);
   }
 
@@ -104,6 +119,7 @@ export class TableDataPanel extends SqlViewPanel {
       this.autoCommit = dataSource.options.autoCommit;
       const objects = await session.listObjects(this.namespace);
       const sort = this.structure.rowKey.map((column) => ({ column, direction: 'asc' as const }));
+      const pageSize = this.pageSize(dataSource);
       this.post({
         type: 'init',
         init: {
@@ -115,11 +131,12 @@ export class TableDataPanel extends SqlViewPanel {
           readOnly: dataSource.options.readOnly,
           structure: this.structure,
           console: null,
-          pageSize: dataSource.options.pageSize,
-          script: buildSelect(this.structure, { where: '', sort, limit: dataSource.options.pageSize, offset: 0 }),
+          pageSize,
+          script: buildSelect(this.structure, { where: '', sort, limit: pageSize, offset: 0 }),
           editorHeight: this.services.context.globalState.get<number>(EDITOR_HEIGHT_KEY) ?? null,
           tables: objects.tables.map((t) => t.name),
           autoCommit: dataSource.options.autoCommit,
+          ...this.exportChoice(),
         },
       });
       SqlViewPanel.updateStatusBar();
@@ -166,8 +183,9 @@ export class TableDataPanel extends SqlViewPanel {
         this.post({ type: 'alterFailed', message: `Commit or roll back the open transaction first: ${reason}` });
         return;
       }
-      if (dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, statements))) {
-        this.post({ type: 'alterFailed', message: 'Nothing was changed.' });
+      const ask = { verb: 'Apply', what: `the structure changes to ${this.ref.table}` };
+      if (dataSource.environment === 'production' && !(await this.confirmProduction(dataSource, statements, ask))) {
+        this.post({ type: 'declined', message: 'Nothing was changed.' });
         return;
       }
       const started = performance.now();

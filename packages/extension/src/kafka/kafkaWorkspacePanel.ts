@@ -5,10 +5,13 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import {
   kafkaSecurityProtocol,
+  ksqlStatementWrites,
   messageContains,
   produceProblem,
+  readPanelRef,
   recordOf,
   type DataSource,
+  type KafkaConnectClient,
   type KafkaLoad,
   type KafkaMessage,
   type KafkaOffsetTarget,
@@ -23,9 +26,10 @@ import {
   type KsqlDbClient,
 } from '@datakit/core';
 import * as vscode from 'vscode';
+import { DataSourceEditor } from '../connections/dataSourceEditor';
 import { CancelledError, errorMessage } from '../connections/prompts';
 import type { Services } from '../services';
-import { renderWebviewHtml, webviewRoot } from '../webview/webviewHtml';
+import { openWebviewPanel, renderWebviewHtml } from '../webview/webviewHtml';
 
 /** Messages produced per request; a larger count is sent in rounds. */
 const PRODUCE_BATCH = 1000;
@@ -39,11 +43,10 @@ const FORMAT_SAMPLES = 4;
 const KSQL_FLUSH_MS = 200;
 /** How long Re-create waits for the deleted topic to go away before it creates it again. */
 const RECREATE_TIMEOUT_MS = 30_000;
+/** How long resetting a connector's offsets waits for it to stop. */
+const CONNECTOR_STOP_TIMEOUT_MS = 30_000;
 
 const plural = (n: number, word: string) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
-
-/** ksqlDB statements that only read; any other one changes the cluster. */
-const KSQL_READS = /^\s*(?:--[^\n]*\n\s*)*(SELECT|SHOW|LIST|DESCRIBE|EXPLAIN|PRINT)\b/i;
 
 function describeTarget(target: KafkaOffsetTarget): string {
   switch (target.kind) {
@@ -137,6 +140,7 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * REST services next to the cluster. It uses the data source's shared session; Kafka clients keep no state between calls.
  */
 export class KafkaWorkspacePanel {
+  static readonly viewType = 'datakit.kafkaWorkspace';
   private static readonly panels = new Map<string, KafkaWorkspacePanel>();
   private static readonly loaded = new vscode.EventEmitter<string>();
   /** Fires with the data source id when a workspace has started; lets the tests check the whole path. */
@@ -155,6 +159,17 @@ export class KafkaWorkspacePanel {
     }
     existing.panel.reveal();
     existing.post({ type: 'navigate', section, topic });
+  }
+
+  /**
+   * Builds the workspace again on a tab VS Code restores after a reload of the window; the page goes back to the
+   * section and topic it showed itself. False when the data source is gone or has a workspace open already.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.kafkaWorkspace(state);
+    if (!ref || services.store.get(ref.dataSourceId)?.engine !== 'kafka' || KafkaWorkspacePanel.panels.has(ref.dataSourceId)) return false;
+    new KafkaWorkspacePanel(services, ref.dataSourceId, 'overview', null, panel);
+    return true;
   }
 
   /** Hands a message to a workspace as if its page had sent it; used by the tests. */
@@ -180,24 +195,29 @@ export class KafkaWorkspacePanel {
   /** Bumped by every topic list, so format samples of an older one are dropped. */
   private topicsRun = 0;
   private readonly ksqlRuns = new Map<number, AbortController>();
+  /** What the page was last told about the data source, so an edit of it is sent again. */
+  private shown = '';
+  /** The page shows settings that were edited since, or could not start; it starts again once the session connects. */
+  private stale = false;
+  private startFailed = false;
 
   private constructor(
     private readonly services: Services,
     private readonly dataSourceId: string,
     private readonly section: KafkaSection,
     private readonly topic: string | null,
+    restored?: vscode.WebviewPanel,
   ) {
     const extensionUri = services.context.extensionUri;
-    this.panel = vscode.window.createWebviewPanel('datakit.kafkaWorkspace', this.title(), vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [webviewRoot(extensionUri)],
-    });
+    this.panel = openWebviewPanel(KafkaWorkspacePanel.viewType, this.title(), extensionUri, restored);
     this.panel.iconPath = vscode.Uri.joinPath(extensionUri, 'media', 'icons', 'kafka.svg');
-    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'kafkaWorkspace', this.title());
+    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'kafkaWorkspace', this.title(), { dataSourceId });
     this.panel.webview.onDidReceiveMessage((message: KafkaWorkspaceWebviewMessage) => void this.handle(message));
     this.panel.onDidChangeViewState(() => KafkaWorkspacePanel.updateStatusBar());
+    // An edit of the data source, e.g. a Schema Registry URL added, reaches the open page without reopening it.
+    const listeners = [services.store.onDidChange(() => this.dataSourceChanged()), services.sessions.onDidChangeStatus((id) => this.statusChanged(id))];
     this.panel.onDidDispose(() => {
+      for (const listener of listeners) listener.dispose();
       this.disposed = true;
       this.streamRun++;
       for (const run of this.ksqlRuns.values()) run.abort();
@@ -213,6 +233,26 @@ export class KafkaWorkspacePanel {
 
   private title(): string {
     return this.dataSource()?.name ?? 'Kafka';
+  }
+
+  /** The settings the page shows; when they change, the page is started again where it is. */
+  private static settingsOf(d: DataSource): string {
+    return JSON.stringify([d.name, d.environment, kafkaSecurityProtocol(d), d.kafka, d.options.readOnly, d.options.pageSize]);
+  }
+
+  private dataSourceChanged(): void {
+    const dataSource = this.dataSource();
+    if (!dataSource || !this.shown) return;
+    this.stale = KafkaWorkspacePanel.settingsOf(dataSource) !== this.shown;
+    this.panel.title = dataSource.name;
+  }
+
+  /** The editor reconnects after a save; the page starts again on the new session, which has the new service URLs. */
+  private statusChanged(id: string): void {
+    if (id !== this.dataSourceId || (!this.stale && !this.startFailed)) return;
+    const status = this.services.sessions.status(id);
+    if (status === 'connected') void this.init();
+    else if (status === 'failed') this.post({ type: 'initFailed', message: this.services.sessions.error(id) ?? 'Could not connect.' });
   }
 
   private post(message: KafkaWorkspaceHostMessage): void {
@@ -271,16 +311,25 @@ export class KafkaWorkspacePanel {
         await vscode.env.clipboard.writeText(message.text);
         this.post({ type: 'notice', message: `Copied ${message.what} to the clipboard.` });
         return;
+      case 'prefs':
+        await this.services.kafkaFavourites.setPrefs(this.dataSourceId, message.prefs);
+        return;
+      case 'editDataSource':
+        DataSourceEditor.show(this.services, this.dataSourceId);
+        return;
     }
   }
 
   private async init(): Promise<void> {
+    this.stale = false;
+    this.startFailed = false;
     const dataSource = this.dataSource();
     if (!dataSource) {
       this.post({ type: 'initFailed', message: 'The data source no longer exists.' });
       return;
     }
     try {
+      this.shown = KafkaWorkspacePanel.settingsOf(dataSource);
       const session = await this.session();
       const { product, version } = session.serverVersion;
       this.serverLabel = version ? `${product} ${version}` : product;
@@ -299,6 +348,7 @@ export class KafkaWorkspacePanel {
           connectUrl: url(dataSource.kafka.connectUrl),
           ksqlDbUrl: url(dataSource.kafka.ksqlDbUrl),
           favourites: this.services.kafkaFavourites.list(this.dataSourceId),
+          prefs: this.services.kafkaFavourites.prefs(this.dataSourceId),
           section: this.section,
           topic: this.topic,
         },
@@ -307,6 +357,7 @@ export class KafkaWorkspacePanel {
       KafkaWorkspacePanel.loaded.fire(this.dataSourceId);
     } catch (error) {
       this.post({ type: 'initFailed', message: error instanceof CancelledError ? 'Connecting was cancelled.' : errorMessage(error) });
+      this.startFailed = true;
     }
   }
 
@@ -421,7 +472,7 @@ export class KafkaWorkspacePanel {
   private async ksql(runId: number, statement: string, properties: Record<string, string>): Promise<void> {
     const dataSource = this.dataSource();
     if (!dataSource) return;
-    const writes = !KSQL_READS.test(statement);
+    const writes = ksqlStatementWrites(statement);
     if (writes && dataSource.options.readOnly) {
       this.post({ type: 'ksqlFailed', runId, message: 'The data source is read-only; this statement changes the cluster.' });
       return;
@@ -429,7 +480,7 @@ export class KafkaWorkspacePanel {
     if (writes && dataSource.environment === 'production') {
       const choice = await vscode.window.showWarningMessage(`Run on “${dataSource.name}” (Production)?`, { modal: true, detail: statement.slice(0, 500) }, 'Run');
       if (choice !== 'Run') {
-        this.post({ type: 'ksqlFailed', runId, message: 'Not run.' });
+        this.post({ type: 'ksqlFailed', runId, message: 'Not run.', cancelled: true });
         return;
       }
     }
@@ -482,7 +533,7 @@ export class KafkaWorkspacePanel {
     if (dataSource.environment === 'production') {
       const choice = await vscode.window.showWarningMessage(`Change “${dataSource.name}” (Production)?`, { modal: true, detail: describeWrite(write) }, 'Apply');
       if (choice !== 'Apply') {
-        this.post({ type: 'failed', kind: write.kind, message: 'Nothing was changed.' });
+        this.post({ type: 'failed', kind: write.kind, message: 'Nothing was changed.', cancelled: true });
         return;
       }
     }
@@ -571,6 +622,7 @@ export class KafkaWorkspacePanel {
         return `Hard-deleted ${write.subject} version ${write.version}.`;
       }
       case 'connector': {
+        if (write.action === 'resetOffsets') return resetConnectorOffsets(connect(session), write.name);
         await connect(session).act(write.name, write.action);
         const done = { pause: 'Paused', resume: 'Resumed', stop: 'Stopped', restart: 'Restarted', delete: 'Deleted', resetOffsets: 'Reset the offsets of' }[write.action];
         return `${done} ${write.name}${write.action === 'restart' ? ' and its tasks' : ''}.`;
@@ -664,7 +716,7 @@ export class KafkaWorkspacePanel {
       await once(out, 'close');
       this.post({ type: 'notice', message: `${cancelled ? 'Stopped; saved' : 'Saved'} ${plural(read, 'message')} to ${name}.` });
     } catch (error) {
-      this.post({ type: 'notice', message: `Dump failed: ${errorMessage(error)}` });
+      this.post({ type: 'notice', message: `Dump failed: ${errorMessage(error)}`, error: true });
     }
   }
 
@@ -699,6 +751,22 @@ function connect(session: KafkaSession) {
 function ksqlDb(session: KafkaSession) {
   if (!session.ksqlDb) throw new Error('No ksqlDB URL is set on this data source.');
   return session.ksqlDb;
+}
+
+/** Connect resets the offsets of stopped connectors only, so a running or paused one is stopped first. */
+async function resetConnectorOffsets(client: KafkaConnectClient, name: string): Promise<string> {
+  const state = async () => (await client.connectors()).find((c) => c.name === name)?.state;
+  const wasStopped = (await state()) === 'STOPPED';
+  if (!wasStopped) {
+    await client.act(name, 'stop');
+    const deadline = Date.now() + CONNECTOR_STOP_TIMEOUT_MS;
+    while ((await state()) !== 'STOPPED') {
+      if (Date.now() > deadline) throw new Error(`${name} was asked to stop but is still running, so its offsets were not reset. Try again in a moment.`);
+      await wait(500);
+    }
+  }
+  await client.act(name, 'resetOffsets');
+  return wasStopped ? `Reset the offsets of ${name}.` : `Stopped ${name} and reset its offsets. Resume it to start over.`;
 }
 
 /** The overrides set on a topic, which a clone or a re-created topic gets too. */

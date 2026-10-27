@@ -1,11 +1,15 @@
 import { createWriteStream } from 'node:fs';
 import { once } from 'node:events';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
+  DEFAULT_MONGO_COLLECTION_PREFS,
   formatServerVersion,
+  MONGO_EXPORT_FORMATS,
+  readPanelRef,
   type DataSource,
   type MongoCollectionHostMessage,
+  type MongoCollectionPrefs,
   type MongoCollectionWebviewMessage,
   type MongoEdit,
   type MongoExportFormat,
@@ -16,7 +20,7 @@ import { stringify } from 'csv-stringify/sync';
 import * as vscode from 'vscode';
 import { CancelledError, errorMessage } from '../connections/prompts';
 import type { Services } from '../services';
-import { renderWebviewHtml, webviewRoot } from '../webview/webviewHtml';
+import { openWebviewPanel, renderWebviewHtml } from '../webview/webviewHtml';
 
 export interface CollectionRef {
   dataSourceId: string;
@@ -27,6 +31,12 @@ export interface CollectionRef {
 /** Documents the schema analysis reads when the page does not say. */
 const DEFAULT_SCHEMA_SAMPLE = 1000;
 const MAX_SCHEMA_SAMPLE = 10_000;
+
+/** The choices collection tabs remember, the page size picked per data source and the folder of the last export. */
+const PREFS_KEY = 'datakit.mongoCollection.prefs';
+const PAGE_SIZES_KEY = 'datakit.mongoCollection.pageSizes';
+const EXPORT_FOLDER_KEY = 'datakit.mongoCollection.exportFolder';
+const VIEWS: ReadonlySet<string> = new Set(['list', 'table', 'json']);
 
 const plural = (n: number, word: string) => `${n.toLocaleString('en-US')} ${word}${n === 1 ? '' : 's'}`;
 
@@ -56,6 +66,30 @@ function describeEdit(edit: MongoEdit): string {
   }
 }
 
+/** The button of the production confirmation: what the edit does, as a verb. */
+function editVerb(edit: MongoEdit): string {
+  switch (edit.kind) {
+    case 'insert':
+      return 'Insert';
+    case 'replace':
+      return 'Save';
+    case 'setField':
+    case 'updateMatching':
+      return 'Update';
+    case 'unsetField':
+      return 'Remove';
+    case 'delete':
+    case 'deleteMatching':
+      return 'Delete';
+    case 'createIndex':
+      return 'Create';
+    case 'dropIndex':
+      return 'Drop';
+    case 'hideIndex':
+      return edit.hidden ? 'Hide' : 'Unhide';
+  }
+}
+
 /** A cell of a CSV export: text as is, other values as relaxed Extended JSON. */
 function csvCell(value: unknown): string {
   if (value === undefined || value === null) return '';
@@ -68,7 +102,13 @@ function csvCell(value: unknown): string {
  * the driver keeps a connection pool, so nothing here holds state on the server.
  */
 export class MongoCollectionPanel {
+  static readonly viewType = 'datakit.mongoCollection';
   private static readonly panels = new Map<string, MongoCollectionPanel>();
+  /**
+   * The choices remembered in this window. globalState keeps them for the next session, but right after a write it
+   * can still answer with an older value for a moment, which would open the next tab with the previous choices.
+   */
+  private static readonly remembered: { prefs?: MongoCollectionPrefs; pageSizes?: Record<string, number> } = {};
   private static readonly loaded = new vscode.EventEmitter<CollectionRef>();
   /** Fires when a collection tab has started; lets the tests check the whole path. */
   static readonly onDidLoad = MongoCollectionPanel.loaded.event;
@@ -82,19 +122,33 @@ export class MongoCollectionPanel {
     else new MongoCollectionPanel(services, ref);
   }
 
+  /**
+   * Builds the collection tab again on a tab VS Code restores after a reload of the window. False when the data
+   * source is gone or the collection is open already; a collection that is gone closes the tab once it is looked up.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.mongoCollection(state);
+    if (!ref || services.store.get(ref.dataSourceId)?.engine !== 'mongodb' || MongoCollectionPanel.panels.has(MongoCollectionPanel.key(ref))) return false;
+    new MongoCollectionPanel(services, ref, panel);
+    return true;
+  }
+
   /** Hands a message to a collection tab as if its page had sent it; used by the tests. */
   static async receive(ref: CollectionRef, message: MongoCollectionWebviewMessage): Promise<void> {
     await MongoCollectionPanel.panels.get(MongoCollectionPanel.key(ref))?.handle(message);
   }
 
-  /** Closes the tabs of a data source, or of one of its databases or collections. */
-  static closeFor(dataSourceId: string, database?: string, collection?: string): void {
+  /** Closes the tabs of a data source, or of one of its databases or collections; returns how many were open. */
+  static closeFor(dataSourceId: string, database?: string, collection?: string): number {
+    let closed = 0;
     for (const panel of [...MongoCollectionPanel.panels.values()]) {
       const r = panel.ref;
       if (r.dataSourceId !== dataSourceId || (database !== undefined && r.database !== database)) continue;
       if (collection !== undefined && r.collection !== collection) continue;
       panel.panel.dispose();
+      closed++;
     }
+    return closed;
   }
 
   static disposeAll(): void {
@@ -108,21 +162,22 @@ export class MongoCollectionPanel {
   private readonly panel: vscode.WebviewPanel;
   /** The database `db` points at in the shell; `use` changes it. */
   private shellDatabase: string;
+  /** The tab came back after a reload of the window, and its page has not been started yet. */
+  private restoring: boolean;
 
   private constructor(
     private readonly services: Services,
     private readonly ref: CollectionRef,
+    restored?: vscode.WebviewPanel,
   ) {
     const extensionUri = services.context.extensionUri;
     this.shellDatabase = ref.database;
+    this.restoring = restored !== undefined;
     const title = `${ref.collection} · ${services.store.get(ref.dataSourceId)?.name ?? ''}`;
-    this.panel = vscode.window.createWebviewPanel('datakit.mongoCollection', title, vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [webviewRoot(extensionUri)],
-    });
+    this.panel = openWebviewPanel(MongoCollectionPanel.viewType, title, extensionUri, restored);
     this.panel.iconPath = vscode.Uri.joinPath(extensionUri, 'media', 'icons', 'mongodb.svg');
-    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'mongoCollection', title);
+    const { dataSourceId, database, collection } = ref;
+    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'mongoCollection', title, { dataSourceId, database, collection });
     this.panel.webview.onDidReceiveMessage((message: MongoCollectionWebviewMessage) => void this.handle(message));
     this.panel.onDidDispose(() => MongoCollectionPanel.panels.delete(MongoCollectionPanel.key(ref)));
     MongoCollectionPanel.panels.set(MongoCollectionPanel.key(ref), this);
@@ -188,8 +243,10 @@ export class MongoCollectionPanel {
         return this.export(message.query, message.format);
       case 'copy':
         await vscode.env.clipboard.writeText(message.text);
-        this.post({ type: 'notice', message: `Copied ${message.what} to the clipboard.` });
+        vscode.window.setStatusBarMessage(`Copied ${message.what} to the clipboard.`, 3000);
         return;
+      case 'remember':
+        return this.remember(message.prefs);
     }
   }
 
@@ -202,10 +259,16 @@ export class MongoCollectionPanel {
     try {
       const session = await this.session();
       const info = await session.collection(this.ref.database, this.ref.collection);
+      if (!info && this.restoring) {
+        // A tab restored after a reload of the window, for a collection dropped since, just closes.
+        this.panel.dispose();
+        return;
+      }
       if (!info) {
         this.post({ type: 'initFailed', message: `${this.ref.database}.${this.ref.collection} no longer exists.` });
         return;
       }
+      this.restoring = false;
       this.post({
         type: 'init',
         init: {
@@ -217,13 +280,43 @@ export class MongoCollectionPanel {
           collection: this.ref.collection,
           type: info.type,
           readOnly: dataSource.options.readOnly,
-          pageSize: dataSource.options.pageSize,
+          pageSize: this.pageSizes()[dataSource.id] ?? dataSource.options.pageSize,
           info,
+          prefs: this.prefs(),
         },
       });
       MongoCollectionPanel.loaded.fire(this.ref);
     } catch (error) {
       this.post({ type: 'initFailed', message: error instanceof CancelledError ? 'Connecting was cancelled.' : errorMessage(error) });
+    }
+  }
+
+  private prefs(): MongoCollectionPrefs {
+    return (
+      MongoCollectionPanel.remembered.prefs ?? {
+        ...DEFAULT_MONGO_COLLECTION_PREFS,
+        ...this.services.context.globalState.get<Partial<MongoCollectionPrefs>>(PREFS_KEY),
+      }
+    );
+  }
+
+  private pageSizes(): Record<string, number> {
+    return MongoCollectionPanel.remembered.pageSizes ?? this.services.context.globalState.get<Record<string, number>>(PAGE_SIZES_KEY) ?? {};
+  }
+
+  /** Keeps a choice of the page for the next tab; values the page cannot have sent are dropped. */
+  private async remember(prefs: Partial<MongoCollectionPrefs> & { pageSize?: number }): Promise<void> {
+    const { globalState } = this.services.context;
+    const next = { ...this.prefs() };
+    if (prefs.view !== undefined && VIEWS.has(prefs.view)) next.view = prefs.view;
+    if (Number.isInteger(prefs.schemaSample) && prefs.schemaSample! > 0) next.schemaSample = Math.min(MAX_SCHEMA_SAMPLE, prefs.schemaSample!);
+    if (MONGO_EXPORT_FORMATS.some((f) => f.value === prefs.exportFormat)) next.exportFormat = prefs.exportFormat!;
+    MongoCollectionPanel.remembered.prefs = next;
+    await globalState.update(PREFS_KEY, next);
+    if (Number.isInteger(prefs.pageSize) && prefs.pageSize! > 0) {
+      const pageSizes = { ...this.pageSizes(), [this.ref.dataSourceId]: prefs.pageSize! };
+      MongoCollectionPanel.remembered.pageSizes = pageSizes;
+      await globalState.update(PAGE_SIZES_KEY, pageSizes);
     }
   }
 
@@ -233,20 +326,23 @@ export class MongoCollectionPanel {
     else this.post({ type: 'loadFailed', what: 'info', message: `${this.ref.database}.${this.ref.collection} no longer exists.` });
   }
 
-  /** Asks before a write on a production data source; a read-only one refuses it. Returns why it may not run. */
-  private async refusal(dataSource: DataSource, description: string): Promise<string | null> {
-    if (dataSource.options.readOnly) return 'The data source is read-only.';
+  /**
+   * Asks before a write on a production data source, with `action` on the button; a read-only one refuses it.
+   * Returns why it may not run, and whether that is because the user said no.
+   */
+  private async refusal(dataSource: DataSource, description: string, action: string): Promise<{ message: string; cancelled?: true } | null> {
+    if (dataSource.options.readOnly) return { message: 'The data source is read-only.' };
     if (dataSource.environment !== 'production') return null;
-    const choice = await vscode.window.showWarningMessage(`Change “${dataSource.name}” (Production)?`, { modal: true, detail: description }, 'Apply');
-    return choice === 'Apply' ? null : 'Nothing was changed.';
+    const choice = await vscode.window.showWarningMessage(`Change “${dataSource.name}” (Production)?`, { modal: true, detail: description }, action);
+    return choice === action ? null : { message: 'Cancelled; nothing was changed.', cancelled: true };
   }
 
   private async edit(edit: MongoEdit): Promise<void> {
     const dataSource = this.dataSource();
     if (!dataSource) return;
-    const refused = await this.refusal(dataSource, `${this.ref.database}.${this.ref.collection}: ${describeEdit(edit)}`);
+    const refused = await this.refusal(dataSource, `${this.ref.database}.${this.ref.collection}: ${describeEdit(edit)}`, editVerb(edit));
     if (refused) {
-      this.post({ type: 'writeFailed', kind: edit.kind, message: refused });
+      this.post({ type: 'writeFailed', kind: edit.kind, ...refused });
       return;
     }
     try {
@@ -269,9 +365,9 @@ export class MongoCollectionPanel {
       const session = await this.session();
       const plan = session.planShell(this.shellDatabase, line);
       if (plan.writes) {
-        const refused = await this.refusal(dataSource, plan.description);
+        const refused = await this.refusal(dataSource, plan.description, 'Run');
         if (refused) {
-          answer(refused, false);
+          answer(refused.message, false);
           return;
         }
       }
@@ -286,7 +382,8 @@ export class MongoCollectionPanel {
 
   /** Saves every matching document, not only the page, with a cancellable progress notification. */
   private async export(query: MongoExportQuery, format: MongoExportFormat): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
+    const { globalState } = this.services.context;
+    const folder = globalState.get<string>(EXPORT_FOLDER_KEY) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? homedir();
     const extension = format === 'jsonl' ? 'jsonl' : format;
     const file = await vscode.window.showSaveDialog({
       title: 'Export Documents',
@@ -295,6 +392,7 @@ export class MongoCollectionPanel {
     });
     if (!file) return;
     const name = file.path.split('/').pop();
+    await globalState.update(EXPORT_FOLDER_KEY, dirname(file.fsPath));
     try {
       const session = await this.session();
       const out = createWriteStream(file.fsPath);
@@ -336,7 +434,7 @@ export class MongoCollectionPanel {
       await once(out, 'close');
       this.post({ type: 'notice', message: `${cancelled ? 'Stopped; saved' : 'Saved'} ${plural(count, 'document')} to ${name}.` });
     } catch (error) {
-      this.post({ type: 'notice', message: `Export failed: ${errorMessage(error)}` });
+      this.post({ type: 'notice', message: `Could not export to ${name}: ${errorMessage(error)}`, error: true });
     }
   }
 }

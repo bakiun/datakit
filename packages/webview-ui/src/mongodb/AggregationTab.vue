@@ -2,18 +2,20 @@
 import type { MongoCollectionHostMessage, MongoDocument } from '@datakit/core';
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import SplitHandle from '../components/SplitHandle.vue';
 import { onHostMessage } from '../host';
 import { useCollection } from './collection';
 import DocumentList from './DocumentList.vue';
 import DocumentsJson from './DocumentsJson.vue';
-import { MOD_KEY, num, pageSizeChoices, plural, startPageSize, writesStage } from './format';
+import { num, pageSizeChoices, plural, startPageSize, writesStage } from './format';
 import ShellCode from './ShellCode.vue';
 import { insertStage } from './shellSyntax';
 
 /**
  * The Aggregation tab: a pipeline in shell syntax, buttons that add common stages, and the first documents it returns
- * as cards or one array. A write elsewhere runs the pipeline again when it is shown, unless it writes ($out, $merge).
+ * as cards or one array. A write elsewhere runs the pipeline again when it is shown. A pipeline that writes ($out,
+ * $merge) runs in the shell instead, which refuses it on read-only data sources and asks first on production ones.
  */
 const props = defineProps<{ active: boolean }>();
 const col = useCollection();
@@ -61,9 +63,25 @@ const status = computed((): { text: string; tone: 'ok' | 'error' | 'muted' } | n
   return { text: `${n ? plural(n, 'document') : 'No documents'}${capped} · ran in ${num(Math.round(durationMs.value))} ms`, tone: loading.value ? 'muted' : 'ok' };
 });
 
+const empty = computed(() => !pipeline.value.trim());
+const writes = computed(() => writesStage(pipeline.value));
+const runTitle = computed(() => {
+  if (empty.value) return 'Write a pipeline to run';
+  if (!writes.value) return `Run (${SUBMIT_KEY})`;
+  if (s.init!.readOnly) return 'Pipelines with $out or $merge write data; the data source is read-only';
+  return `Pipelines with $out or $merge write data, so they run in the shell (${SUBMIT_KEY})`;
+});
+
 function run(again = false): void {
   const text = again && ran ? ran.pipeline : pipeline.value;
   if (!text.trim()) return;
+  if (!again && writesStage(text)) {
+    if (s.init!.readOnly) return;
+    // The shell may be in another database after `use`.
+    if (s.shell.database !== s.init!.database) col.runShell(`use ${s.init!.database}`, true);
+    col.runShell(`db.getCollection(${JSON.stringify(s.init!.collection)}).aggregate(${text.trim()})`, true);
+    return;
+  }
   ran = { pipeline: text, limit: again && ran ? ran.limit : limit.value };
   current.value = col.nextRequestId();
   loading.value = true;
@@ -110,8 +128,18 @@ onUnmounted(stop);
           <option v-for="n in limits" :key="n" :value="n">{{ n }}</option>
         </select>
       </label>
-      <button type="button" class="btn sm" title="Show how the server runs this pipeline" @click="col.explain({ pipeline }, 'aggregate')">Explain</button>
-      <button type="button" class="btn sm btn-primary" :title="`Run (${MOD_KEY}+Enter)`" :disabled="loading" @click="run()"><Icon name="run" :size="12" filled /> Run</button>
+      <button
+        type="button"
+        class="btn sm"
+        :disabled="empty"
+        :title="empty ? 'Write a pipeline to explain' : 'Show how the server runs this pipeline'"
+        @click="col.explain({ pipeline }, 'aggregate')"
+      >
+        Explain
+      </button>
+      <button type="button" class="btn sm btn-primary" :title="runTitle" :disabled="loading || empty || (writes && s.init!.readOnly)" @click="run()">
+        <Icon name="run" :size="12" filled /> {{ writes ? 'Run in shell' : 'Run' }}
+      </button>
     </div>
     <div class="editor" :style="{ height: `${editorHeight}px` }">
       <ShellCode ref="editor" v-model="pipeline" label="Aggregation pipeline in shell syntax" placeholder="[ { $match: {} } ]" @run="run()" />
@@ -134,7 +162,7 @@ onUnmounted(stop);
         <DocumentsJson v-else :documents="documents" />
       </template>
       <p v-else-if="!documents && !loading && !error" class="empty-state">
-        Write a pipeline and run it with {{ MOD_KEY }}+Enter. The buttons above add common stages at the end.
+        Write a pipeline and run it with {{ SUBMIT_KEY }}. The buttons above add common stages at the end.
       </p>
     </div>
   </div>

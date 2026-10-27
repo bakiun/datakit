@@ -68,6 +68,21 @@ suite('MongoDB collections', () => {
   }
 
   const edit = (e: MongoEdit) => send({ type: 'edit', edit: e }, 'written', 'writeFailed');
+
+  /** Opens a collection from the tree and waits for its first message. */
+  async function openFromTree(database: string, collection: string): Promise<Reply<'init'>> {
+    const db = (await api.tree.getChildren(await root())).find((n) => labelOf(n) === database)!;
+    const node = (await api.tree.getChildren(db)).find((n) => labelOf(n) === collection)!;
+    const init = new Promise<Reply<'init'>>((resolve) => {
+      const listener = api.onDidPostMongo((posted) => {
+        if (posted.message.type !== 'init' || posted.ref.database !== database || posted.ref.collection !== collection) return;
+        listener.dispose();
+        resolve(posted.message);
+      });
+    });
+    await vscode.commands.executeCommand('datakit.openMongoCollection', node);
+    return init;
+  }
   const query = (patch: Partial<MongoFindQuery> = {}): MongoFindQuery => ({ filter: '', projection: '', sort: '', collation: '', skip: 0, limit: 20, ...patch });
 
   suiteSetup(async () => {
@@ -149,7 +164,7 @@ suite('MongoDB collections', () => {
 
     const refused = await edit({ kind: 'deleteMatching', filter: '' });
     assert.equal(refused.type, 'writeFailed');
-    const deleted = await stubbing('showWarningMessage', 'Apply', () => edit({ kind: 'delete', ids: [newId] }));
+    const deleted = await stubbing('showWarningMessage', 'Delete', () => edit({ kind: 'delete', ids: [newId] }));
     assert.equal(deleted.type === 'written' && deleted.result.affected, 1);
   });
 
@@ -191,5 +206,35 @@ suite('MongoDB collections', () => {
     assert.equal(saved.message, 'Saved 3 documents to people.jsonl.');
     const lines = (await readFile(file, 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { name: string });
     assert.deepEqual(lines.map((l) => l.name), ['Linus', 'Ada', 'Grace']);
+  });
+
+  test('asks before writes on production with the verb on the button, and a no changes nothing quietly', async () => {
+    const dataSource = api.store.get(id)!;
+    await api.store.save(id, { ...dataSource, environment: 'production' }, {});
+    try {
+      const declined = await stubbing('showWarningMessage', undefined, () => edit({ kind: 'insert', text: '{ name: "Temp" }' }));
+      assert.deepEqual(declined, { type: 'writeFailed', kind: 'insert', message: 'Cancelled; nothing was changed.', cancelled: true });
+      const inserted = await stubbing('showWarningMessage', 'Insert', () => edit({ kind: 'insert', text: '{ name: "Temp" }' }));
+      assert.equal(inserted.type, 'written');
+      const tempId = inserted.type === 'written' ? inserted.result.insertedIds[0]! : '';
+      const deleted = await stubbing('showWarningMessage', 'Delete', () => edit({ kind: 'delete', ids: [tempId] }));
+      assert.equal(deleted.type === 'written' && deleted.result.affected, 1);
+    } finally {
+      await api.store.save(id, dataSource, {});
+    }
+  });
+
+  test('remembers the view, export format, schema sample and page size for the next tab', async () => {
+    // One tab remembers the choices; another tab of the same data source starts with them.
+    await openFromTree('shop', 'orders');
+    const orders: CollectionRef = { dataSourceId: id, database: 'shop', collection: 'orders' };
+    await api.sendToMongo(orders, { type: 'remember', prefs: { view: 'table', exportFormat: 'csv', schemaSample: 100, pageSize: 100 } });
+    const { init } = await openFromTree('shop', 'customers');
+    try {
+      assert.deepEqual(init.prefs, { view: 'table', exportFormat: 'csv', schemaSample: 100 });
+      assert.equal(init.pageSize, 100);
+    } finally {
+      await api.sendToMongo(orders, { type: 'remember', prefs: { view: 'list', exportFormat: 'json', schemaSample: 1000 } });
+    }
   });
 });

@@ -73,6 +73,9 @@ export interface TableDataInit {
   /** Tables of the database, suggested for foreign key targets and completed in the editor. */
   tables: string[];
   autoCommit: boolean;
+  /** The export format and rows the user picked last, in any SQL view. */
+  exportFormat: ExportFormat;
+  exportScope: ExportScope;
 }
 
 export interface LoadedPage {
@@ -92,7 +95,8 @@ export type LogLevel = 'info' | 'ok' | 'warning' | 'error';
 
 export type TableDataHostMessage =
   | { type: 'init'; init: TableDataInit }
-  | { type: 'initFailed'; message: string }
+  /** `connection` is set when the data source could not be connected to, so the page offers to edit it. */
+  | { type: 'initFailed'; message: string; connection?: boolean }
   /** `summary` describes the other statements of a run, or the edit that was just written. */
   | { type: 'page'; page: LoadedPage; summary?: string }
   /** A run without a statement that returns rows. */
@@ -100,6 +104,11 @@ export type TableDataHostMessage =
   /** `failed` is where the failing statement is in the editor. */
   | { type: 'runFailed'; message: string; summary?: string; failed?: { from: number; to: number } }
   | { type: 'submitFailed'; message: string }
+  /**
+   * The user declined the production confirmation of a run, a write or a structure change; nothing was done.
+   * Not an error: the view only stops waiting and says so quietly.
+   */
+  | { type: 'declined'; message: string }
   /** Whether a transaction is open, and how many writes it holds. */
   | { type: 'transaction'; open: boolean; changes: number }
   | { type: 'notice'; message: string }
@@ -136,8 +145,12 @@ export type TableDataWebviewMessage =
   | { type: 'txMode'; autoCommit: boolean }
   /** The user resized the SQL editor; every data view opens with this height. */
   | { type: 'editorHeight'; height: number }
+  /** The user picked a page size in the grid; the SQL views of the data source open with it. */
+  | { type: 'pageSize'; pageSize: number }
   /** ALTER TABLE statements built from the Structure tab. */
   | { type: 'alterTable'; statements: string[] }
+  /** Opens the data source's settings, e.g. after the view could not connect. */
+  | { type: 'editDataSource' }
   /** Data view: opens a new query console with this script. */
   | { type: 'openConsole'; script: string }
   /** Console: the editor text changed; it is saved to the console's file. */

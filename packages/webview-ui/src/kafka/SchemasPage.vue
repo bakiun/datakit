@@ -47,7 +47,8 @@ async function setCompatibility(event: Event): Promise<void> {
   if (!d) return;
   const select = event.target as HTMLSelectElement;
   busy.value = true;
-  const result = await ws.write({ kind: 'setCompatibility', subject: d.subject, level: select.value ? (select.value as SchemaCompatibility) : null });
+  // The select shows the new level, so no toast repeats it.
+  const result = await ws.write({ kind: 'setCompatibility', subject: d.subject, level: select.value ? (select.value as SchemaCompatibility) : null }, { announce: false });
   busy.value = false;
   if (result.ok) open(d.subject, d.version);
   else select.value = d.compatibility ?? '';
@@ -56,7 +57,7 @@ async function setCompatibility(event: Event): Promise<void> {
 async function setGlobal(event: Event): Promise<void> {
   const select = event.target as HTMLSelectElement;
   busy.value = true;
-  const result = await ws.write({ kind: 'setGlobalCompatibility', level: select.value as SchemaCompatibility });
+  const result = await ws.write({ kind: 'setGlobalCompatibility', level: select.value as SchemaCompatibility }, { announce: false });
   busy.value = false;
   if (!result.ok) select.value = s.globalCompatibility ?? '';
 }
@@ -119,7 +120,13 @@ onUnmounted(stop);
           <span class="name">{{ x.name }}</span>
           <span class="chip tone-muted">{{ x.type }}</span>
         </button>
-        <p v-if="!subjects.length" class="empty-state">{{ s.loading.subjects ? 'Reading the subjects…' : 'The registry has no subjects yet.' }}</p>
+        <p v-if="!subjects.length" class="empty-state">
+          <template v-if="s.loading.subjects">Reading the subjects…</template>
+          <template v-else>
+            The registry has no subjects yet.
+            <button v-if="!readOnly" type="button" class="lnk" @click="dialog = 'new'">Register a schema</button>
+          </template>
+        </p>
       </div>
 
       <div v-if="picked" class="schema">
@@ -157,7 +164,7 @@ onUnmounted(stop);
       :subject="null"
       type="AVRO"
       schema=""
-      :existing="subjects.map((x) => x.name)"
+      :existing="subjects"
       @registered="registered"
       @close="dialog = null"
     />
@@ -180,10 +187,10 @@ onUnmounted(stop);
     />
     <ConfirmDialog
       v-else-if="dialog === 'hard' && detail"
-      title="Hard delete schema version"
+      :title="`Hard delete ${detail.subject} v${detail.version}`"
       text="Permanently removes this schema version. Consumers that still reference its id will fail to deserialize."
       :target="`${detail.subject} v${detail.version}`"
-      primary="Delete"
+      primary="Hard delete"
       :action="deleteAction(true)"
       @close="dialog = null"
     />

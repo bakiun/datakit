@@ -1,4 +1,4 @@
-import type { RedisArg, RedisCommand, RedisKeyType, RedisText, RedisWritePlan } from './types';
+import type { RedisArg, RedisCheck, RedisCommand, RedisKeyType, RedisText, RedisWritePlan } from './types';
 import { redisTextLabel } from './types';
 
 /** A change the key browser makes. Each becomes a write plan: commands in MULTI/EXEC, guarded by checks. */
@@ -60,10 +60,16 @@ export function editProblem(edit: RedisEdit): string | null {
 
 const plan = (commands: RedisCommand[], watch: RedisArg[] = [], checks: RedisWritePlan['checks'] = []): RedisWritePlan => ({ watch, checks, commands });
 
+/** The message of the checks that find a list element changed since it was loaded. */
+export const LIST_CHANGED = 'The list changed since it was loaded, so nothing was written.';
+
+/** Checks that an item still holds what was loaded, so a change made meanwhile is not overwritten. */
+const unchanged = (command: RedisCommand, expect: RedisText | null, message: string): RedisCheck => ({ command, expect, message, stale: true });
+
 /**
- * The commands of an edit. Renames check that the new name is free, list edits that the element is still the one
- * shown, so a change made meanwhile is not overwritten. `sentinel` marks list elements to delete: Redis deletes list
- * elements by value, not by position.
+ * The commands of an edit. Renames check that the new name is free and that the item still holds what they carry
+ * over, list edits that the element is still the one shown, so a change made meanwhile is not overwritten.
+ * `sentinel` marks list elements to delete: Redis deletes list elements by value, not by position.
  */
 export function planEdit(edit: RedisEdit, sentinel = `datakit:deleted:${Math.random().toString(36).slice(2)}`): RedisWritePlan {
   const k: RedisArg = 'key' in edit ? edit.key : '';
@@ -78,29 +84,24 @@ export function planEdit(edit: RedisEdit, sentinel = `datakit:deleted:${Math.ran
       return plan(
         [['HDEL', k, edit.from], ['HSET', k, edit.to, edit.value]],
         [k],
-        [{ command: ['HEXISTS', k, edit.to], expect: 0, message: `The hash already has a field “${edit.to}”.` }],
+        [
+          { command: ['HEXISTS', k, edit.to], expect: 0, message: `The hash already has a field “${edit.to}”.` },
+          unchanged(['HGET', k, edit.from], edit.value, `The field “${redisTextLabel(edit.from)}” changed since it was loaded, so nothing was written.`),
+        ],
       );
     case 'hashFieldTtl':
       return plan([edit.ttl === null ? ['HPERSIST', k, 'FIELDS', '1', edit.field] : ['HEXPIRE', k, String(edit.ttl), 'FIELDS', '1', edit.field]]);
     case 'hashDelete':
       return plan([['HDEL', k, ...edit.fields]]);
     case 'listSet':
-      return plan(
-        [['LSET', k, String(edit.index), edit.value]],
-        [k],
-        [{ command: ['LINDEX', k, String(edit.index)], expect: edit.expected, message: 'The list changed since it was loaded; reload it.' }],
-      );
+      return plan([['LSET', k, String(edit.index), edit.value]], [k], [unchanged(['LINDEX', k, String(edit.index)], edit.expected, LIST_CHANGED)]);
     case 'listPush':
       return plan([['RPUSH', k, edit.value]]);
     case 'listDelete':
       return plan(
         [...edit.items.map((item): RedisCommand => ['LSET', k, String(item.index), sentinel]), ['LREM', k, '0', sentinel]],
         [k],
-        edit.items.map((item) => ({
-          command: ['LINDEX', k, String(item.index)],
-          expect: item.expected,
-          message: 'The list changed since it was loaded; reload it.',
-        })),
+        edit.items.map((item) => unchanged(['LINDEX', k, String(item.index)], item.expected, LIST_CHANGED)),
       );
     case 'setAdd':
       return plan([['SADD', k, edit.member]]);
@@ -118,7 +119,10 @@ export function planEdit(edit: RedisEdit, sentinel = `datakit:deleted:${Math.ran
       return plan(
         [['ZREM', k, edit.from], ['ZADD', k, edit.score, edit.to]],
         [k],
-        [{ command: ['ZSCORE', k, edit.to], expect: null, message: `The sorted set already has “${edit.to}”.` }],
+        [
+          { command: ['ZSCORE', k, edit.to], expect: null, message: `The sorted set already has “${edit.to}”.` },
+          unchanged(['ZSCORE', k, edit.from], edit.score, `The score of “${redisTextLabel(edit.from)}” changed since it was loaded, so nothing was written.`),
+        ],
       );
     case 'zsetDelete':
       return plan([['ZREM', k, ...edit.members]]);

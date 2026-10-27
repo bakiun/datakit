@@ -10,9 +10,11 @@ import {
 } from '@datakit/core';
 import { format, type SqlLanguage } from 'sql-formatter';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import ResizeHandle from '../components/ResizeHandle.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import { onHostMessage } from '../host';
 import DataGrid from './DataGrid.vue';
 import ResultPanel from './ResultPanel.vue';
@@ -23,6 +25,8 @@ import { useSqlView } from './useSqlView';
 /** A query console: a SQL script of a data source, run in the database picked above it. */
 const init = ref<TableDataInit | null>(null);
 const initError = ref<string | null>(null);
+/** The data source could not be connected to; the error offers its settings next to Retry. */
+const initConnection = ref(false);
 const script = ref('');
 const editor = ref<InstanceType<typeof ScriptEditor>>();
 const view = useSqlView(init, editor, script);
@@ -47,6 +51,8 @@ const unseen = ref(0);
 
 const plan = ref<LoadedPage | null>(null);
 const planError = ref<string | null>(null);
+/** Nothing to explain at the cursor: an empty state with the next step, not an error. */
+const planHint = ref<string | null>(null);
 const planLoading = ref(false);
 const planChanges = useTableChanges(plan);
 const planSelected = ref(new Set<RowId>());
@@ -64,6 +70,10 @@ const editorHeight = ref(DEFAULT_EDITOR_HEIGHT);
 const maxEditorHeight = () => window.innerHeight - 200;
 
 const completion = computed(() => Object.fromEntries(tables.value.map((t) => [t, [] as string[]])));
+/** A PostgreSQL console reconnects to change database, which an open transaction would not survive. */
+const databaseLocked = computed(() =>
+  view.dialect === 'postgres' && view.transaction.open ? 'Commit or roll back the open transaction to change the database' : null,
+);
 const resultCount = computed(() => (view.page ? (view.total ?? view.rowCount).toLocaleString('en-US') : ''));
 
 /** The editor text is saved to the console's file; the text it opened with needs no save. */
@@ -119,11 +129,13 @@ function explain(): void {
   }
   if (!statement) {
     plan.value = null;
-    planError.value = 'Put the cursor in a SELECT, UPDATE, DELETE or INSERT statement to see how the server runs it.';
+    planError.value = null;
+    planHint.value = 'Put the cursor in a SELECT, UPDATE, DELETE or INSERT statement to see how the server runs it.';
     return;
   }
   planLoading.value = true;
   planError.value = null;
+  planHint.value = null;
   view.post({ type: 'explain', statement, ...(view.dialect === 'postgres' ? { analyze: analyze.value } : {}) });
 }
 
@@ -154,7 +166,7 @@ const stop = onHostMessage<TableDataHostMessage>((message) => {
   switch (message.type) {
     case 'init':
       init.value = message.init;
-      view.autoCommit = message.init.autoCommit;
+      view.start(message.init);
       saved = message.init.script;
       script.value = message.init.script;
       database.value = message.init.console?.database ?? '';
@@ -165,6 +177,7 @@ const stop = onHostMessage<TableDataHostMessage>((message) => {
       break;
     case 'initFailed':
       initError.value = message.message;
+      initConnection.value = message.connection === true;
       break;
     case 'database':
       database.value = message.database;
@@ -219,18 +232,28 @@ onUnmounted(() => {
 <template>
   <div v-if="initError" class="failed">
     <p role="alert"><Icon name="error" :size="14" /> {{ initError }}</p>
-    <button type="button" class="btn" @click="retry">Retry</button>
+    <div class="failed-actions">
+      <button type="button" class="btn btn-primary" @click="retry">Retry</button>
+      <button v-if="initConnection" type="button" class="btn" @click="view.post({ type: 'editDataSource' })">Edit Data Source</button>
+    </div>
   </div>
   <div v-else-if="!init?.console" class="opening note">Opening console…</div>
   <div v-else class="console">
     <div role="toolbar" aria-label="Query" class="bar">
-      <IconButton icon="run" label="Run (Ctrl+Enter) — the selection if there is one" filled tone="ok" :disabled="view.locked" @click="view.run()" />
+      <IconButton icon="run" :label="`Run (${SUBMIT_KEY}) — the selection if there is one`" filled tone="ok" :disabled="view.busy" @click="view.run()" />
       <IconButton icon="stop" label="Stop query" tone="danger" :disabled="!view.loading" @click="view.post({ type: 'stop' })" />
       <span class="sep" />
       <label class="field">
         Source
         <span class="source">{{ init.dataSourceName }} /</span>
-        <select class="sel" aria-label="Database" :value="database" :disabled="view.loading" @change="useDatabase">
+        <select
+          class="sel"
+          aria-label="Database"
+          :title="databaseLocked ?? undefined"
+          :value="database"
+          :disabled="view.loading || !!databaseLocked"
+          @change="useDatabase"
+        >
           <option v-if="!database" value="" disabled>no database</option>
           <option v-for="name in init.console.databases" :key="name" :value="name">{{ name }}</option>
         </select>
@@ -289,7 +312,7 @@ onUnmounted(() => {
       v-if="tab === 'result'"
       :view="view"
       :run-controls="false"
-      empty-text="Run a statement (Ctrl+Enter) to see its result here."
+:empty-text="`Run a statement (${SUBMIT_KEY}) to see its result here.`"
       @goto="editor?.focusAt($event)"
     />
 
@@ -314,6 +337,7 @@ onUnmounted(() => {
         <IconButton icon="reload" label="Explain again — the statement at the cursor" :disabled="planLoading" @click="explain" />
       </div>
       <p v-if="planError" class="plan-error" role="alert"><Icon name="error" :size="14" /> {{ planError }}</p>
+      <p v-else-if="planHint" class="empty">{{ planHint }}</p>
       <pre v-else-if="planText !== null" class="grid-area plan-text mono" :class="{ dim: planLoading }">{{ planText }}</pre>
       <div v-else-if="plan" class="grid-area" :class="{ dim: planLoading }">
         <DataGrid
@@ -329,6 +353,15 @@ onUnmounted(() => {
       </div>
       <p v-else class="empty">{{ planLoading ? 'Explaining…' : '' }}</p>
     </div>
+
+    <ConfirmDialog
+      v-if="view.discardPrompt"
+      title="Discard unsaved changes?"
+      :text="view.discardPrompt.text"
+      :primary="view.discardPrompt.primary"
+      :action="view.discardAndProceed"
+      @close="view.discardPrompt = null"
+    />
   </div>
 </template>
 
@@ -342,6 +375,10 @@ onUnmounted(() => {
 .opening,
 .failed {
   padding: 24px 28px;
+}
+.failed-actions {
+  display: flex;
+  gap: 8px;
 }
 .failed p {
   display: flex;

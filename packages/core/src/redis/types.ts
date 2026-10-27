@@ -107,6 +107,16 @@ export interface RedisCheck {
   expect: RedisText | number | null;
   /** Shown when the reply differs. */
   message: string;
+  /** The check guards an item as it was loaded; when it fails, the value changed meanwhile and is read again. */
+  stale?: boolean;
+}
+
+/** Thrown by `RedisSession.write` when a check fails; nothing was written. */
+export class RedisCheckError extends Error {
+  constructor(readonly check: RedisCheck) {
+    super(check.message);
+    this.name = 'RedisCheckError';
+  }
 }
 
 /** Commands that run together in MULTI/EXEC, after WATCH on `watch` and the checks passed. */

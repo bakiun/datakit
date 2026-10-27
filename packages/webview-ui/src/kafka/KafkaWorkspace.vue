@@ -51,6 +51,9 @@ function retry(): void {
   ws.post({ type: 'ready' });
 }
 
+/** The workspace picks up the saved settings by itself. */
+const editDataSource = () => ws.post({ type: 'editDataSource' });
+
 onMounted(() => ws.post({ type: 'ready' }));
 onUnmounted(() => {
   clearInterval(timer);
@@ -62,7 +65,11 @@ onUnmounted(() => {
 <template>
   <div v-if="s.initError" class="failed">
     <p role="alert"><Icon name="error" :size="14" /> {{ s.initError }}</p>
-    <button type="button" class="btn" @click="retry">Retry</button>
+    <div class="failed-actions">
+      <button type="button" class="btn btn-primary" @click="retry">Retry</button>
+      <button type="button" class="btn" @click="editDataSource">Edit data source</button>
+    </div>
+    <p class="note">The workspace opens by itself once the data source connects.</p>
   </div>
   <div v-else-if="!s.init" class="opening note">Opening Kafka workspace…</div>
   <div v-else class="kafka-workspace">
@@ -71,7 +78,10 @@ onUnmounted(() => {
       <main class="content" :aria-label="label">
         <section v-if="missing" class="page">
           <header class="page-head"><h1>{{ missing }}</h1></header>
-          <p class="empty-state not-configured">Add the {{ missing }} URL on the data source's General tab.</p>
+          <p class="empty-state not-configured">
+            No {{ missing }} URL is set for this data source.
+            <button type="button" class="lnk" @click="editDataSource">Add it on the General tab</button>
+          </p>
         </section>
         <OverviewPage v-else-if="s.section === 'overview'" />
         <BrokersPage v-else-if="s.section === 'brokers'" />
@@ -103,11 +113,17 @@ onUnmounted(() => {
 .failed {
   padding: 24px 28px;
 }
-.failed p {
+.failed p[role='alert'] {
   display: flex;
   align-items: center;
   gap: 6px;
   color: var(--vscode-errorForeground);
+}
+.failed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 .body {
   flex: 1;

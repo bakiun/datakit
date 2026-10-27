@@ -10,7 +10,8 @@ import { shellLanguageSupport } from './shellSyntax';
 
 /**
  * A CodeMirror editor for shell syntax (documents, filters, pipelines): highlighting, bracket matching and
- * indentation. Ctrl/Cmd+Enter emits `run`. `compact` leaves out line numbers, for small fields in forms.
+ * indentation. ⌘Enter (Ctrl+Enter off macOS; on macOS Ctrl+Enter as well) emits `run`. `compact` leaves out line
+ * numbers, for small fields in forms.
  */
 const props = withDefaults(defineProps<{ label: string; readOnly?: boolean; placeholder?: string; compact?: boolean; autofocus?: boolean }>(), {
   readOnly: false,
@@ -45,7 +46,14 @@ onMounted(() => {
         props.placeholder ? placeholder(props.placeholder) : [],
         EditorView.cspNonce.of(document.body.dataset.nonce ?? ''),
         EditorView.contentAttributes.of({ 'aria-label': props.label }),
-        keymap.of([{ key: 'Mod-Enter', run: () => (emit('run'), true) }, ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+        keymap.of([
+          { key: 'Mod-Enter', run: () => (emit('run'), true) },
+          // As in the SQL editor, Ctrl+Enter runs on macOS as well as ⌘Enter.
+          { mac: 'Ctrl-Enter', run: () => (emit('run'), true) },
+          ...closeBracketsKeymap,
+          ...defaultKeymap,
+          ...historyKeymap,
+        ]),
         mode.of(modeExtensions()),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) model.value = update.state.doc.toString();

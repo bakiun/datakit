@@ -1,17 +1,25 @@
 <script setup lang="ts">
-import { REDIS_KEY_TYPES, type RedisEdit, type RedisKeyType } from '@datakit/core';
-import { computed, ref } from 'vue';
+import { editProblem, REDIS_KEY_TYPES, type RedisEdit, type RedisKeyType } from '@datakit/core';
+import { computed, ref, watch, type Directive } from 'vue';
 import FormRow from '../components/FormRow.vue';
+import { isSubmitShortcut, SUBMIT_KEY } from '../components/shortcuts';
+import { parseTtl } from './format';
 
-/** Creates a key with its first item; Redis has no empty hashes, lists, sets or streams. */
-defineProps<{ busy: boolean; error: string | null }>();
+/**
+ * Creates a key with its first item; Redis has no empty hashes, lists, sets or streams. The name starts with the
+ * fixed part of the listed pattern, e.g. `user:` for `user:*`. Enter in a field, or ⌘Enter (Ctrl+Enter off macOS)
+ * anywhere in the form, the value included, creates; Esc cancels.
+ */
+const props = defineProps<{ busy: boolean; error: string | null; prefix: string }>();
 const emit = defineEmits<{ create: [edit: RedisEdit]; cancel: [] }>();
 
-const name = ref('');
+const name = ref(props.prefix);
 const type = ref<RedisKeyType>('string');
 const ttl = ref('');
 const first = ref('');
 const second = ref('');
+/** Focuses the name with the caret after the prefilled prefix. */
+const vFocusEnd: Directive<HTMLInputElement> = { mounted: (el) => (el.focus(), el.setSelectionRange(el.value.length, el.value.length)) };
 
 const labels = computed((): [string, string | null] => {
   switch (type.value) {
@@ -35,25 +43,50 @@ function pickType(next: RedisKeyType): void {
   second.value = next === 'zset' ? '0' : '';
 }
 
+const edit = computed((): RedisEdit => {
+  const seconds = parseTtl(ttl.value);
+  return { kind: 'createKey', key: name.value, type: type.value, ttl: Number.isNaN(seconds) ? -1 : seconds, first: first.value, second: second.value };
+});
+/**
+ * Why the key cannot be created yet, as the tooltip of Create. It is shown in the form only for something typed
+ * wrong, such as a TTL or score that cannot be read, not for a field still to be filled in.
+ */
+const problem = computed(() => editProblem(edit.value));
+const missing = computed(() => name.value === '' || ((type.value === 'hash' || type.value === 'stream') && first.value === ''));
+const shownProblem = computed(() => (missing.value ? null : problem.value));
+/** The name the extension's error was about; the error goes once the name is changed. */
+const erredName = ref<string | null>(null);
+watch(
+  () => props.error,
+  (error) => (erredName.value = error ? name.value : null),
+);
+const shownError = computed(() => (props.error && name.value === erredName.value ? props.error : shownProblem.value));
+
 function create(): void {
-  const seconds = ttl.value.trim() === '' ? null : Number(ttl.value.trim());
-  emit('create', { kind: 'createKey', key: name.value, type: type.value, ttl: Number.isNaN(seconds) ? -1 : seconds, first: first.value, second: second.value });
+  if (!problem.value && !props.busy) emit('create', edit.value);
+}
+
+function onKey(event: KeyboardEvent): void {
+  if (isSubmitShortcut(event)) {
+    event.preventDefault();
+    create();
+  } else if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) emit('cancel');
 }
 </script>
 
 <template>
-  <form class="new-key" aria-label="New key" @submit.prevent="create">
+  <form class="new-key" aria-label="New key" @submit.prevent="create" @keydown="onKey">
     <h2>New key</h2>
     <FormRow label="Key" for="n-name">
-      <input id="n-name" v-model="name" class="fld mono grow" placeholder="e.g. session:1042" spellcheck="false" autofocus />
+      <input id="n-name" v-model="name" v-focus-end class="fld mono grow" placeholder="e.g. session:1042" spellcheck="false" />
     </FormRow>
     <FormRow label="Type" for="n-type">
       <select id="n-type" class="fld select" :value="type" @change="pickType(($event.target as HTMLSelectElement).value as RedisKeyType)">
         <option v-for="t in REDIS_KEY_TYPES" :key="t" :value="t">{{ t }}</option>
       </select>
     </FormRow>
-    <FormRow label="TTL (s)" for="n-ttl">
-      <input id="n-ttl" v-model="ttl" class="fld mono ttl" placeholder="empty = no expiry" inputmode="numeric" />
+    <FormRow label="TTL" for="n-ttl">
+      <input id="n-ttl" v-model="ttl" class="fld mono ttl" placeholder="none, or e.g. 3600, 30m, 2h" />
     </FormRow>
     <FormRow :label="labels[0]" for="n-first" :top="type === 'string'">
       <textarea v-if="type === 'string'" id="n-first" v-model="first" class="fld mono grow value" spellcheck="false" />
@@ -63,9 +96,9 @@ function create(): void {
       <input id="n-second" v-model="second" class="fld mono grow" spellcheck="false" />
     </FormRow>
     <div class="actions">
-      <button type="submit" class="btn btn-primary" :disabled="busy">Create</button>
+      <button type="submit" class="btn btn-primary" :disabled="busy || !!problem" :title="problem ?? `Create (${SUBMIT_KEY})`">Create</button>
       <button type="button" class="btn" @click="emit('cancel')">Cancel</button>
-      <span v-if="error" class="error" role="alert">{{ error }}</span>
+      <span v-if="shownError" class="error" role="alert">{{ shownError }}</span>
     </div>
   </form>
 </template>
@@ -84,7 +117,7 @@ h2 {
   font-weight: 600;
 }
 .ttl {
-  flex: 0 1 200px;
+  flex: 0 1 260px;
 }
 .value {
   height: 120px;

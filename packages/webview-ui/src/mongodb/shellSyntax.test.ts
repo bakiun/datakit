@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { highlightShell, insertStage, withoutId } from './shellSyntax';
+import { filterFields, highlightShell, indexKeys, insertStage, withoutId } from './shellSyntax';
 
 const classed = (text: string) =>
   highlightShell(text)
@@ -74,5 +74,24 @@ describe('insertStage', () => {
   it('leaves text without a closing bracket alone', () => {
     expect(insertStage('[{ $match: {} }', '{ $limit: 5 }')).toBe('[{ $match: {} }');
     expect(insertStage('{ $match: {} }', '{ $limit: 5 }')).toBe('{ $match: {} }');
+  });
+});
+
+describe('filterFields', () => {
+  it('lists the top-level fields a filter tests, without operators', () => {
+    expect(filterFields('{ status: "paid", "customer.tier": "gold", $or: [{ a: 1 }], total: { $gt: 5 } }')).toEqual(['status', 'customer.tier', 'total']);
+    expect(filterFields("{ 'a b': 1, status: 2, status: 3 }")).toEqual(['a b', 'status']);
+  });
+
+  it('finds none in empty or broken filters', () => {
+    expect(filterFields('')).toEqual([]);
+    expect(filterFields('{}')).toEqual([]);
+    expect(filterFields('[1, 2]')).toEqual([]);
+  });
+});
+
+describe('indexKeys', () => {
+  it('quotes names that are not identifiers', () => {
+    expect(indexKeys(['status', 'customer.tier'])).toBe('{ status: 1, "customer.tier": 1 }');
   });
 });

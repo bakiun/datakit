@@ -3,26 +3,39 @@ import { join } from 'node:path';
 import { expandHome } from '@datakit/adapter-common';
 import {
   createDataSourceSettings,
+  ENGINES,
   formatServerVersion,
+  suggestDataSourceName,
   toSettings,
   validateDataSource,
   type DataSourceSettings,
   type EditorHostMessage,
   type EditorState,
   type EditorWebviewMessage,
+  type EngineId,
+  type Environment,
   type FileField,
+  readPanelRef,
   type SecretPatch,
   type Secrets,
 } from '@datakit/core';
 import * as vscode from 'vscode';
 import type { Services } from '../services';
-import { renderWebviewHtml, webviewRoot } from '../webview/webviewHtml';
+import { openWebviewPanel, renderWebviewHtml } from '../webview/webviewHtml';
 import { connectNewDataSource } from './actions';
 import { driverFor } from './drivers';
-import { CancelledError, errorMessage } from './prompts';
+import { CancelledError, errorMessage, showConnectionError } from './prompts';
 import { resolveSecrets } from './sessionManager';
 
 const NEW_KEY = 'new';
+/** The engine of the data source created last; a new form starts with it. */
+const LAST_ENGINE_KEY = 'datakit.lastNewEngine';
+
+/** What a new data source starts with when the command knows it, e.g. the environment folder it was run on. */
+export interface NewDataSourcePreset {
+  engine?: EngineId;
+  environment?: Environment;
+}
 
 const BROWSE_TITLES: Record<FileField, string> = {
   'ssh.privateKeyPath': 'Select SSH Private Key',
@@ -33,19 +46,32 @@ const BROWSE_TITLES: Record<FileField, string> = {
 
 /** The “New data source” / “Edit data source” editor tab. One tab per data source, one for a new one. */
 export class DataSourceEditor {
+  static readonly viewType = 'datakit.dataSourceEditor';
   private static readonly editors = new Map<string, DataSourceEditor>();
   private static readonly loaded = new vscode.EventEmitter<string | null>();
   /** Fires with the data source id (null for a new one) when an editor's page has loaded and asked for its data. */
   static readonly onDidLoad = DataSourceEditor.loaded.event;
 
-  static show(services: Services, id?: string): void {
+  static show(services: Services, id?: string, preset: NewDataSourcePreset = {}): void {
     const existing = DataSourceEditor.editors.get(id ?? NEW_KEY);
     if (existing) existing.panel.reveal();
-    else new DataSourceEditor(services, id ?? null);
+    else new DataSourceEditor(services, id ?? null, preset);
   }
 
   static close(id: string): void {
     DataSourceEditor.editors.get(id)?.panel.dispose();
+  }
+
+  /**
+   * Builds the editor again on a tab VS Code restores after a reload of the window; the page brings its draft back
+   * itself. False when the data source it edited is gone or already has an editor open.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.dataSourceEditor(state);
+    if (!ref || DataSourceEditor.editors.has(ref.dataSourceId ?? NEW_KEY)) return false;
+    if (ref.dataSourceId !== null && !services.store.get(ref.dataSourceId)) return false;
+    new DataSourceEditor(services, ref.dataSourceId, {}, panel);
+    return true;
   }
 
   private readonly panel: vscode.WebviewPanel;
@@ -53,18 +79,31 @@ export class DataSourceEditor {
   private constructor(
     private readonly services: Services,
     private id: string | null,
+    private readonly preset: NewDataSourcePreset,
+    restored?: vscode.WebviewPanel,
   ) {
     const extensionUri = services.context.extensionUri;
-    this.panel = vscode.window.createWebviewPanel('datakit.dataSourceEditor', this.title(), vscode.ViewColumn.Active, {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [webviewRoot(extensionUri)],
-    });
-    this.panel.iconPath = vscode.Uri.joinPath(extensionUri, 'media', 'icons', 'mysql.svg');
-    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'dataSourceEditor', this.title());
+    this.panel = openWebviewPanel(DataSourceEditor.viewType, this.title(), extensionUri, restored);
+    this.panel.iconPath = this.icon();
+    this.panel.webview.html = renderWebviewHtml(this.panel.webview, extensionUri, 'dataSourceEditor', this.title(), { dataSourceId: id });
     this.panel.webview.onDidReceiveMessage((message: EditorWebviewMessage) => void this.handle(message));
     this.panel.onDidDispose(() => DataSourceEditor.editors.delete(this.id ?? NEW_KEY));
     DataSourceEditor.editors.set(id ?? NEW_KEY, this);
+  }
+
+  /** The engine's icon once the data source exists; a new one, which can still switch engines, shows the plain database. */
+  private icon(): vscode.Uri {
+    const engine = this.id ? this.services.store.get(this.id)?.engine : undefined;
+    return vscode.Uri.joinPath(this.services.context.extensionUri, 'media', 'icons', `${engine ?? 'mysql'}.svg`);
+  }
+
+  /** A new form: the engine asked for or used last, and the environment of the folder it was opened from. */
+  private newSettings(): DataSourceSettings {
+    const last = this.services.context.globalState.get<string>(LAST_ENGINE_KEY);
+    const engine = this.preset.engine ?? ENGINES.find((e) => e.id === last)?.id ?? 'mysql';
+    const settings = createDataSourceSettings(engine);
+    if (this.preset.environment) settings.environment = this.preset.environment;
+    return settings;
   }
 
   private title(): string {
@@ -103,7 +142,7 @@ export class DataSourceEditor {
     return {
       mode: dataSource ? 'edit' : 'new',
       id: dataSource?.id ?? null,
-      settings: dataSource ? toSettings(dataSource) : createDataSourceSettings('mysql'),
+      settings: dataSource ? toSettings(dataSource) : this.newSettings(),
       storedSecrets: dataSource ? await store.storedSecrets(dataSource) : { password: false, sshPassword: false, sshPassphrase: false },
       otherNames: store
         .list()
@@ -145,6 +184,8 @@ export class DataSourceEditor {
       .list()
       .filter((d) => d.id !== this.id)
       .map((d) => d.name);
+    // A data source saved without a name is named after its endpoint, as the form's placeholder shows.
+    if (!settings.name.trim()) settings = { ...settings, name: suggestDataSourceName(settings, otherNames) };
     const errors = validateDataSource(settings, otherNames);
     const firstError = Object.values(errors)[0];
     if (firstError) {
@@ -165,6 +206,7 @@ export class DataSourceEditor {
       DataSourceEditor.editors.delete(NEW_KEY);
       DataSourceEditor.editors.set(dataSource.id, this);
       this.id = dataSource.id;
+      await this.services.context.globalState.update(LAST_ENGINE_KEY, dataSource.engine);
     }
     // A password that is not saved is still used for the connection that follows.
     const overrides: Secrets = patch.password !== undefined ? { password: patch.password } : {};
@@ -172,6 +214,7 @@ export class DataSourceEditor {
     if (close) this.panel.dispose();
     else {
       this.panel.title = this.title();
+      this.panel.iconPath = this.icon();
       this.post({ type: 'saved', state: await this.state() });
     }
 
@@ -179,12 +222,12 @@ export class DataSourceEditor {
       await connectNewDataSource(this.services, dataSource, overrides);
       return;
     }
-    void vscode.window.showInformationMessage(`Saved “${dataSource.name}”.`);
+    // Apply says “Saved.” in the form; after Save the tab is gone, so the status bar says it.
+    if (close) vscode.window.setStatusBarMessage(`$(check) Saved “${dataSource.name}”`, 4000);
     if (wasActive) {
-      sessions.reconnect(dataSource.id, overrides).catch((error: unknown) => {
-        if (error instanceof CancelledError) return;
-        void vscode.window.showErrorMessage(`Could not reconnect “${dataSource.name}”: ${errorMessage(error)}`);
-      });
+      sessions.reconnect(dataSource.id, overrides).catch((error: unknown) =>
+        showConnectionError(dataSource, error, 'datakit.connectDataSource', `Saved “${dataSource.name}”, but could not reconnect`),
+      );
     }
   }
 

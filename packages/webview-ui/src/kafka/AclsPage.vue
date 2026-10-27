@@ -96,7 +96,13 @@ onMounted(() => ws.load('acls'));
         </tbody>
       </table>
       <p v-if="!s.acls" class="empty-state">{{ s.loading.acls ? 'Reading the ACLs…' : '' }}</p>
-      <p v-else-if="!rows.length" class="empty-state">{{ all.length ? 'No ACL matches the filter.' : 'The cluster has no ACLs yet.' }}</p>
+      <p v-else-if="!rows.length && all.length" class="empty-state">
+        No ACL matches the filter. <button type="button" class="lnk" @click="filter = ''">Clear the filter</button>
+      </p>
+      <p v-else-if="!rows.length" class="empty-state">
+        The cluster has no ACLs yet.
+        <button v-if="!readOnly" type="button" class="lnk" @click="dialog = 'template'">Create them from a template</button>
+      </p>
       <p v-else-if="rows.length > shown.length" class="empty-state">Showing {{ num(shown.length) }} of {{ num(rows.length) }} ACLs. Filter to narrow them down.</p>
     </div>
 
@@ -105,7 +111,7 @@ onMounted(() => ws.load('acls'));
       v-else-if="dialog === 'delete'"
       :title="`Delete ${plural(chosen.length, 'ACL')}`"
       :text="`Deletes the selected ${plural(chosen.length, 'ACL')}. Clients that rely on them lose that access at once.`"
-      primary="Delete"
+      :primary="`Delete ${plural(chosen.length, 'ACL')}`"
       :action="remove"
       @close="dialog = null"
     />

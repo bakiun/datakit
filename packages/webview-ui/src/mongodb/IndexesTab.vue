@@ -9,14 +9,29 @@ import CreateIndexDialog from './CreateIndexDialog.vue';
 import { formatBytes, formatDay, formatSeconds, num, plural } from './format';
 import ShellText from './ShellText.vue';
 
-/** The indexes of the collection with their options, size and use; hide, unhide, drop and create them. */
+/**
+ * The indexes of the collection with their options, size and use; hide, unhide, drop and create them. Explain can
+ * ask for Create index with the keys of a query (`state.createIndex`).
+ */
 const props = defineProps<{ active: boolean }>();
 const col = useCollection();
 const s = col.state;
 
-const creating = ref(false);
+/** The keys Create index starts with; null while it is closed. */
+const creating = ref<string | null>(null);
 const dropping = ref<MongoIndex | null>(null);
+const production = computed(() => s.init!.environment === 'production');
 let readVersion = -1;
+
+watch(
+  () => s.createIndex,
+  (request) => {
+    if (!request) return;
+    creating.value = request.keys;
+    s.createIndex = null;
+  },
+  { immediate: true },
+);
 
 const indexes = computed(() => s.indexes ?? []);
 const totalBytes = computed(() => (indexes.value.every((i) => i.bytes !== null) ? indexes.value.reduce((n, i) => n + (i.bytes ?? 0), 0) : null));
@@ -73,7 +88,7 @@ const drop = () => col.write({ kind: 'dropIndex', name: dropping.value!.name }, 
       </span>
       <span class="spacer" />
       <IconButton icon="reload" label="Read the indexes again" :disabled="s.loading.indexes" @click="load" />
-      <button v-if="col.canWrite.value" type="button" class="btn sm btn-primary" @click="creating = true"><Icon name="plus" :size="14" /> Create index…</button>
+      <button v-if="col.canWrite.value" type="button" class="btn sm btn-primary" @click="creating = '{  }'"><Icon name="plus" :size="14" /> Create index…</button>
     </div>
     <p v-if="s.errors.indexes" class="error-line pad" role="alert"><Icon name="error" :size="14" /> {{ s.errors.indexes }}</p>
     <div v-if="s.indexes" class="table-box list" :class="{ dim: s.loading.indexes }">
@@ -118,13 +133,13 @@ const drop = () => col.write({ kind: 'dropIndex', name: dropping.value!.name }, 
       <p v-if="!indexes.length" class="empty-state">No indexes.</p>
     </div>
 
-    <CreateIndexDialog v-if="creating" @close="creating = false" />
+    <CreateIndexDialog v-if="creating !== null" :keys="creating" @close="creating = null" />
     <ConfirmDialog
       v-if="dropping"
       title="Drop index"
       :text="`Drop the index ${dropping.name} on ${s.init!.collection}? Queries that use it get slower until it is created again.`"
       primary="Drop index"
-      :target="dropping.name"
+      :target="production ? dropping.name : null"
       :action="drop"
       @close="dropping = null"
     />

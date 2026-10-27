@@ -5,6 +5,7 @@ import {
   formatCommand,
   formatReply,
   formatScanCommand,
+  LIST_CHANGED,
   parseScanCommand,
   planEdit,
   redisTextLabel,
@@ -18,19 +19,24 @@ describe('planEdit', () => {
     expect(planEdit({ kind: 'setString', key: 'k', value: 'v', ttl: 30, keepTtl: false }).commands).toEqual([['SET', 'k', 'v', 'EX', '30']]);
   });
 
-  it('renames a field only when the new name is free', () => {
+  it('renames a field only when the new name is free and the value is still the one loaded', () => {
     const p = planEdit({ kind: 'hashRenameField', key: 'h', from: 'a', to: 'b', value: '1' });
     expect(p).toEqual({
       watch: ['h'],
-      checks: [{ command: ['HEXISTS', 'h', 'b'], expect: 0, message: 'The hash already has a field “b”.' }],
+      checks: [
+        { command: ['HEXISTS', 'h', 'b'], expect: 0, message: 'The hash already has a field “b”.' },
+        { command: ['HGET', 'h', 'a'], expect: '1', message: 'The field “a” changed since it was loaded, so nothing was written.', stale: true },
+      ],
       commands: [['HDEL', 'h', 'a'], ['HSET', 'h', 'b', '1']],
     });
+    expect(planEdit({ kind: 'zsetRename', key: 'z', from: 'm', to: 'n', score: '2' }).checks[1]).toMatchObject({ command: ['ZSCORE', 'z', 'm'], expect: '2', stale: true });
   });
 
   it('deletes list elements by position, checking they are unchanged', () => {
     const p = planEdit({ kind: 'listDelete', key: 'l', items: [{ index: 0, expected: 'x' }, { index: 2, expected: { hex: 'ff' } }] }, 'DEL');
     expect(p.commands).toEqual([['LSET', 'l', '0', 'DEL'], ['LSET', 'l', '2', 'DEL'], ['LREM', 'l', '0', 'DEL']]);
     expect(p.checks.map((c) => [c.command, c.expect])).toEqual([[['LINDEX', 'l', '0'], 'x'], [['LINDEX', 'l', '2'], { hex: 'ff' }]]);
+    expect(p.checks.every((c) => c.stale && c.message === LIST_CHANGED)).toBe(true);
   });
 
   it('creates keys of each type only when the name is free, with an optional TTL', () => {
@@ -90,11 +96,20 @@ describe('the key list command', () => {
 
   it('turns KEYS into a SCAN and leaves other commands alone', () => {
     expect(parse('KEYS session:*')).toEqual({ ok: true, scan: { cursor: '0', match: 'session:*', count: null, type: null }, fromKeys: true });
+    expect(parse('KEYS')).toEqual({ ok: true, scan: { cursor: '0', match: '*', count: null, type: null }, fromKeys: true });
     expect(parse('HGETALL session:1')).toBeNull();
+    expect(parse('PING')).toBeNull();
+  });
+
+  it('reads a lone pattern as a SCAN and starts a SCAN without a cursor at 0', () => {
+    expect(parse('user:*')).toEqual({ ok: true, scan: { cursor: '0', match: 'user:*', count: null, type: null }, fromKeys: false });
+    expect(parse('session:1')).toEqual({ ok: true, scan: { cursor: '0', match: 'session:1', count: null, type: null }, fromKeys: false });
+    expect(parse('SCAN')).toEqual({ ok: true, scan: { cursor: '0', match: '*', count: null, type: null }, fromKeys: false });
+    expect(parse('scan match user:* type hash')).toEqual({ ok: true, scan: { cursor: '0', match: 'user:*', count: null, type: 'hash' }, fromKeys: false });
   });
 
   it('explains what is wrong', () => {
-    expect(parse('SCAN')).toEqual({ ok: false, error: 'SCAN needs a cursor first, e.g. SCAN 0 MATCH user:*.' });
+    expect(parse('KEYS a b')).toEqual({ ok: false, error: 'KEYS takes one pattern; put a pattern with spaces in quotes, e.g. KEYS "user name:*".' });
     expect(parse('SCAN 0 COUNT many')).toEqual({ ok: false, error: 'COUNT must be a whole number above 0.' });
     expect(parse('SCAN 0 LIMIT 5')).toEqual({ ok: false, error: 'Unknown SCAN option “LIMIT”. Use MATCH, COUNT or TYPE.' });
     expect(parse('SCAN 0 MATCH')).toEqual({ ok: false, error: 'MATCH needs a value.' });

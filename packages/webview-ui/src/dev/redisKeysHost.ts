@@ -1,7 +1,9 @@
 import {
   formatCommand,
+  LIST_CHANGED,
   planEdit,
   redisTextLabel,
+  removesData,
   type HashRow,
   type RedisKeyDetail,
   type RedisKeysHostMessage,
@@ -13,6 +15,10 @@ import {
 /**
  * Plays the extension for the Redis key browser on the dev server, with the keys of the design in memory.
  * Edits change the in-memory keys; a CLI line containing `fail` fails, other lines answer OK.
+ * `&match=user:*` opens on that pattern as if it was used last time. `&decline` declines every confirmation (deletions).
+ * A list edit whose value holds `stale`, and with `&stale` the first list deletion, find the list changed meanwhile
+ * (an element was pushed in front);
+ * an edit whose value holds `cancel` is declined. Creating or renaming to an existing key fails.
  */
 type Value =
   | { type: 'string'; text: string }
@@ -66,7 +72,10 @@ function seed(): Map<string, Key> {
 
 export function installRedisKeysHost(reply: (message: RedisKeysHostMessage, delay?: number) => void): (message: RedisKeysWebviewMessage) => void {
   const keys = seed();
-  const readOnly = new URLSearchParams(location.search).has('readonly');
+  const params = new URLSearchParams(location.search);
+  const readOnly = params.has('readonly');
+  const lastMatch = params.get('match');
+  let staleDelete = params.has('stale');
   const name = (key: RedisText) => redisTextLabel(key);
   const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
 
@@ -204,6 +213,7 @@ export function installRedisKeysHost(reply: (message: RedisKeysHostMessage, dela
             databases: Array.from({ length: 16 }, (_, index) => ({ index, keys: index === 0 ? keys.size : index === 3 ? 12 : 0 })),
             pageSize: 100,
             scanCount: 500,
+            lastScan: lastMatch ? { cursor: '0', match: lastMatch, type: null, count: null } : null,
             fieldTtl: true,
             keepTtl: true,
           },
@@ -223,6 +233,24 @@ export function installRedisKeysHost(reply: (message: RedisKeysHostMessage, dela
       case 'more':
         break;
       case 'edit': {
+        const e = message.edit;
+        const typed = JSON.stringify(e);
+        if (typed.includes('cancel') || (params.has('decline') && removesData(e))) {
+          reply({ type: 'writeFailed', message: 'Nothing was written.', reason: 'cancelled' }, 300);
+          break;
+        }
+        if ((e.kind === 'listSet' && e.value.includes('stale')) || (e.kind === 'listDelete' && staleDelete)) {
+          staleDelete = false;
+          const v = keys.get(name(e.key))?.value;
+          if (v?.type === 'list') v.items.unshift('{"to":"pushed@example.com","tpl":"meanwhile"}');
+          reply({ type: 'writeFailed', message: LIST_CHANGED, reason: 'stale' }, 150);
+          break;
+        }
+        const taken = e.kind === 'createKey' ? e.key : e.kind === 'renameKey' ? e.to : null;
+        if (taken !== null && keys.has(taken)) {
+          reply({ type: 'writeFailed', message: `A key named “${taken}” already exists.` }, 150);
+          break;
+        }
         const commands = planEdit(message.edit).commands.map((c) => formatCommand(c));
         const next = apply(message.edit);
         reply({ type: 'written', commands, key: next, summary: 'OK' }, 150);

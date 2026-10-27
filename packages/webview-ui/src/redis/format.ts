@@ -24,6 +24,21 @@ export function shortTtl(ttl: number | null): string {
   return `${Math.round(ttl / 86400)}d`;
 }
 
+const TTL_UNITS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
+
+/**
+ * A typed TTL in seconds: `90`, `90s`, `30m`, `2h`, `1d` or `1h 30m`; null when empty (no expiry), NaN when it
+ * cannot be read.
+ */
+export function parseTtl(text: string): number | null {
+  const typed = text.trim().toLowerCase().replace(/,/g, '');
+  if (typed === '') return null;
+  if (/^\d+$/.test(typed)) return Number(typed);
+  const parts = [...typed.matchAll(/(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)(?![a-z])\s*/g)];
+  if (!parts.length || parts.map((p) => p[0]).join('') !== typed) return Number.NaN;
+  return parts.reduce((sum, [, n, unit]) => sum + Number(n) * TTL_UNITS[unit![0]!]!, 0);
+}
+
 export function longTtl(ttl: number | null): string {
   return ttl === null ? 'no expiry' : `${ttl.toLocaleString('en-US')} s`;
 }

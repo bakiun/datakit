@@ -1,4 +1,5 @@
 import type { Environment } from '../dataSource';
+import type { ScanCommand } from '../redis/command';
 import type { RedisEdit } from '../redis/edits';
 import type { RedisDatabase, RedisKeyDetail, RedisKeyInfo, RedisPageStart, RedisText, RedisValuePage } from '../redis/types';
 
@@ -18,6 +19,8 @@ export interface RedisKeysInit {
   pageSize: number;
   /** The COUNT hint SCAN gets when the command does not give one. */
   scanCount: number;
+  /** The key list query last used on this data source, so the browser opens where it was left; null the first time. */
+  lastScan: ScanCommand | null;
   /** HEXPIRE and friends exist (Redis 7.4+), so hashes show a TTL per field. */
   fieldTtl: boolean;
   /** SET … KEEPTTL exists (Redis 6+); otherwise a string write sets the shown TTL again. */
@@ -44,11 +47,16 @@ export type RedisKeysHostMessage =
   | { type: 'keyFailed'; message: string }
   /** An edit was written; `commands` are echoed in the CLI. `key` is the key to show now, e.g. after a rename. */
   | { type: 'written'; commands: string[]; key: RedisText | null; summary: string }
-  | { type: 'writeFailed'; message: string }
+  /**
+   * Nothing was written. `cancelled`: the confirmation was declined. `stale`: the item changed since it was loaded,
+   * so the page reads the value again and offers the edit once more.
+   */
+  | { type: 'writeFailed'; message: string; reason?: 'cancelled' | 'stale' }
   | { type: 'database'; database: number; databases: RedisDatabase[] }
   /** The reply to a CLI line; `wrote` when the command changes data, so the page reloads what it shows. */
   | { type: 'cli'; line: string; output: string; ok: boolean; durationMs: number; wrote: boolean }
-  | { type: 'notice'; message: string };
+  /** A line for the message bar, e.g. that an export was saved; `error` when something failed. */
+  | { type: 'notice'; message: string; error?: boolean };
 
 export type RedisKeysWebviewMessage =
   | { type: 'ready' }

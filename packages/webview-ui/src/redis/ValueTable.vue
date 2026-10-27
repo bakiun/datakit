@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {
+  editProblem,
   REDIS_EXPORT_FORMATS,
+  sameRedisText,
   type HashRow,
   type ListRow,
   type RedisEdit,
@@ -12,14 +14,15 @@ import {
 } from '@datakit/core';
 import { computed, ref, watch, type Directive } from 'vue';
 import IconButton from '../components/IconButton.vue';
-import { isBinary, longTtl, textOf } from './format';
+import { isBinary, longTtl, parseTtl, textOf } from './format';
 
 export type CollectionType = 'hash' | 'list' | 'set' | 'zset' | 'stream';
 export type ValueRow = HashRow | ListRow | SetRow | ZsetRow | StreamRow;
 
 /**
  * The items of a hash, list, set, sorted set or stream. A cell edit is written when Enter is pressed or the cell
- * loses focus; Esc cancels. Binary items are shown as `\x..` escapes and cannot be edited here.
+ * loses focus; Esc cancels. An edit that is not valid keeps its editor open with the reason. Binary items are shown
+ * as `\x..` escapes and cannot be edited here.
  */
 const props = defineProps<{
   keyName: RedisText;
@@ -31,7 +34,8 @@ const props = defineProps<{
   readOnly: boolean;
   busy: boolean;
 }>();
-const emit = defineEmits<{ edit: [edit: RedisEdit]; more: []; reload: []; export: [format: RedisExportFormat] }>();
+/** `dismiss`: an editor was closed with Esc, so a message about its last write is no longer current. */
+const emit = defineEmits<{ edit: [edit: RedisEdit]; more: []; reload: []; export: [format: RedisExportFormat]; dismiss: [] }>();
 const active = defineModel<number>('active', { required: true });
 
 interface Column {
@@ -82,10 +86,13 @@ function canEdit(row: ValueRow, column: Column): boolean {
   return !props.readOnly && !column.readOnly && props.type !== 'stream' && !display(row, column).binary;
 }
 
-const editing = ref<{ row: number; column: string; draft: string } | null>(null);
+/** The open cell editor; `problem` says why its draft cannot be written, `quiet` keeps it from taking the focus. */
+const editing = ref<{ row: number; column: string; draft: string; problem?: string; quiet?: boolean } | null>(null);
 const adding = ref<Record<string, string> | null>(null);
 const selected = ref(new Set<number>());
-const vFocus: Directive<HTMLInputElement | HTMLTextAreaElement> = { mounted: (el) => (el.focus(), el.select()) };
+const vFocus: Directive<HTMLInputElement | HTMLTextAreaElement, boolean | undefined> = {
+  mounted: (el, binding) => binding.value !== true && (el.focus(), el.select()),
+};
 const vFocusIf: Directive<HTMLInputElement, boolean> = { mounted: (el, binding) => binding.value && el.focus() };
 
 watch(
@@ -93,6 +100,13 @@ watch(
   () => {
     editing.value = null;
     selected.value = new Set([...selected.value].filter((i) => i < props.rows.length));
+  },
+);
+
+watch(
+  () => editing.value?.draft,
+  () => {
+    if (editing.value?.problem) editing.value.problem = undefined;
   },
 );
 
@@ -112,7 +126,7 @@ function editFor(row: ValueRow, column: string, draft: string): RedisEdit | null
       const r = row as HashRow;
       if (column === 'field') return draft !== textOf(r.field) ? { kind: 'hashRenameField', key, from: r.field, to: draft, value: r.value } : null;
       if (column === 'value') return draft !== textOf(r.value) ? { kind: 'hashSet', key, field: r.field, value: draft } : null;
-      const ttl = draft.trim() === '' ? null : Number(draft.replace(/[^0-9]/g, ''));
+      const ttl = parseTtl(draft);
       return ttl !== r.ttl ? { kind: 'hashFieldTtl', key, field: r.field, ttl } : null;
     }
     case 'list': {
@@ -135,15 +149,23 @@ function editFor(row: ValueRow, column: string, draft: string): RedisEdit | null
 
 function commit(): void {
   const current = editing.value;
+  const row = current ? props.rows[current.row] : undefined;
+  const edit = current && row ? editFor(row, current.column, current.draft) : null;
+  const problem = edit && editProblem(edit);
+  if (current && problem) {
+    // Kept open with the reason, so what was typed can be fixed instead of typed again.
+    current.problem = problem;
+    return;
+  }
   editing.value = null;
-  const row = current && props.rows[current.row];
-  if (!current || !row) return;
-  const edit = editFor(row, current.column, current.draft);
   if (edit) emit('edit', edit);
 }
 
 function onCellKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape') editing.value = null;
+  if (event.key === 'Escape') {
+    editing.value = null;
+    emit('dismiss');
+  }
   // In a multi-line value Shift+Enter starts a new line.
   else if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
@@ -171,10 +193,9 @@ function startAdd(): void {
   adding.value = props.type === 'zset' ? { member: '', score: '0' } : {};
 }
 
-function submitAdd(): void {
+const addEdit = computed((): RedisEdit | null => {
   const v = adding.value;
-  if (!v) return;
-  adding.value = null;
+  if (!v) return null;
   const key = props.keyName;
   const edits: Record<CollectionType, RedisEdit> = {
     hash: { kind: 'hashSet', key, field: v.field ?? '', value: v.value ?? '' },
@@ -183,11 +204,22 @@ function submitAdd(): void {
     zset: { kind: 'zsetAdd', key, member: v.member ?? '', score: v.score ?? '0' },
     stream: { kind: 'streamAdd', key, fields: [[v.field ?? '', v.value ?? '']] },
   };
-  emit('edit', edits[props.type]);
+  return edits[props.type];
+});
+const addProblem = computed(() => (addEdit.value ? editProblem(addEdit.value) : null));
+
+function submitAdd(): void {
+  const edit = addEdit.value;
+  if (!edit || addProblem.value || props.busy) return;
+  adding.value = null;
+  emit('edit', edit);
 }
 
 function onAddKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape') adding.value = null;
+  if (event.key === 'Escape') {
+    adding.value = null;
+    emit('dismiss');
+  }
 }
 
 function deleteSelected(): void {
@@ -205,6 +237,82 @@ function deleteSelected(): void {
   selected.value = new Set();
 }
 
+/** The row an edit was made on: the one at `index` when it still matches, else the only row that matches. */
+function locate(match: (row: ValueRow) => boolean, index = -1): number {
+  const at = props.rows[index];
+  if (at && match(at)) return index;
+  const found = props.rows.flatMap((row, i) => (match(row) ? [i] : []));
+  return found.length === 1 ? found[0]! : -1;
+}
+
+/**
+ * Brings back an edit that was not written, after a declined confirmation or after the value was read again because
+ * it had changed: the cell editor or the add form with what was typed, or the selection of a deletion. Returns false
+ * when the item cannot be found any more.
+ */
+function restore(edit: RedisEdit): boolean {
+  const idle = !document.activeElement || document.activeElement === document.body;
+  const reopen = (match: (row: ValueRow) => boolean, column: string, draft: string, index = -1): boolean => {
+    const row = locate(match, index);
+    if (row < 0) return false;
+    active.value = row;
+    editing.value = { row, column, draft, quiet: !idle };
+    return true;
+  };
+  const readd = (values: Record<string, string>): boolean => {
+    editing.value = null;
+    adding.value = values;
+    return true;
+  };
+  const reselect = (matches: ((row: ValueRow) => boolean)[], indexes: number[] = []): boolean => {
+    const found = matches.map((match, i) => locate(match, indexes[i])).filter((i) => i >= 0);
+    selected.value = new Set(found);
+    return found.length === matches.length;
+  };
+  const same = sameRedisText;
+  switch (edit.kind) {
+    case 'hashSet': {
+      const field = (r: ValueRow) => same((r as HashRow).field, edit.field);
+      return locate(field) >= 0 ? reopen(field, 'value', edit.value) : readd({ field: textOf(edit.field), value: edit.value });
+    }
+    case 'hashRenameField':
+      return reopen((r) => same((r as HashRow).field, edit.from), 'field', edit.to);
+    case 'hashFieldTtl':
+      return reopen((r) => same((r as HashRow).field, edit.field), 'ttl', edit.ttl === null ? '' : String(edit.ttl));
+    case 'listSet':
+      return reopen((r) => same((r as ListRow).value, edit.expected), 'value', edit.value, edit.index);
+    case 'listPush':
+      return readd({ value: edit.value });
+    case 'setAdd':
+      return readd({ member: edit.member });
+    case 'setRename':
+      return reopen((r) => same((r as SetRow).member, edit.from), 'member', edit.to);
+    case 'zsetAdd': {
+      const member = (r: ValueRow) => same((r as ZsetRow).member, edit.member);
+      return locate(member) >= 0 ? reopen(member, 'score', edit.score) : readd({ member: textOf(edit.member), score: edit.score });
+    }
+    case 'zsetRename':
+      return reopen((r) => same((r as ZsetRow).member, edit.from), 'member', edit.to);
+    case 'streamAdd':
+      return readd({ field: edit.fields[0]?.[0] ?? '', value: edit.fields[0]?.[1] ?? '' });
+    case 'hashDelete':
+      return reselect(edit.fields.map((f) => (r) => same((r as HashRow).field, f)));
+    case 'listDelete':
+      return reselect(
+        edit.items.map((item) => (r) => same((r as ListRow).value, item.expected)),
+        edit.items.map((item) => item.index),
+      );
+    case 'setDelete':
+    case 'zsetDelete':
+      return reselect(edit.members.map((m) => (r) => same((r as SetRow).member, m)));
+    case 'streamDelete':
+      return reselect(edit.ids.map((id) => (r) => (r as StreamRow).id === id));
+    default:
+      return false;
+  }
+}
+defineExpose({ restore });
+
 function toggle(index: number): void {
   const next = new Set(selected.value);
   if (next.has(index)) next.delete(index);
@@ -219,6 +327,14 @@ function toggleAll(): void {
 }
 
 const exportFormat = ref<RedisExportFormat>('json');
+const READ_ONLY = 'The data source is read-only';
+const deleteLabel = computed(() => (props.readOnly ? READ_ONLY : selected.value.size ? 'Delete the selected items' : 'Select items with their checkboxes to delete them'));
+const hint = computed(() => {
+  if (editing.value?.problem) return editing.value.problem;
+  if (props.readOnly) return 'Read-only';
+  if (props.type === 'stream') return 'Stream entries cannot be changed, only added and deleted';
+  return 'Click a cell to edit · Enter writes to Redis · Esc cancels';
+});
 const count = computed(() => {
   const total = props.length ?? props.rows.length;
   return `${total.toLocaleString('en-US')} ${unit.value}${total === 1 ? '' : props.type === 'stream' ? 'ies' : 's'}`.replace('entryies', 'entries');
@@ -230,8 +346,8 @@ const count = computed(() => {
     <span class="count">{{ count }}</span>
     <IconButton icon="reload" label="Reload the value" :disabled="busy" @click="emit('reload')" />
     <span class="sep" />
-    <IconButton icon="plus" :label="addLabel" :disabled="readOnly || busy || adding !== null" @click="startAdd" />
-    <IconButton icon="minus" label="Delete the selected items" :disabled="readOnly || busy || !selected.size" @click="deleteSelected" />
+    <IconButton icon="plus" :label="readOnly ? READ_ONLY : addLabel" :disabled="readOnly || busy || adding !== null" @click="startAdd" />
+    <IconButton icon="minus" :label="deleteLabel" :disabled="readOnly || busy || !selected.size" @click="deleteSelected" />
     <span class="sep" />
     <label class="field">
       Export
@@ -240,7 +356,7 @@ const count = computed(() => {
       </select>
     </label>
     <IconButton icon="download" label="Export every item of the key" @click="emit('export', exportFormat)" />
-    <span class="hint">{{ readOnly ? 'Read-only' : type === 'stream' ? 'Stream entries cannot be changed, only added and deleted' : 'Click a cell to edit · Enter writes to Redis · Esc cancels' }}</span>
+    <span class="hint" :class="{ problem: editing?.problem }" :role="editing?.problem ? 'alert' : undefined">{{ hint }}</span>
   </div>
 
   <form v-if="adding" class="add-row" :aria-label="addLabel" @submit.prevent="submitAdd">
@@ -254,7 +370,7 @@ const count = computed(() => {
       :aria-label="`New ${f.label}`"
       @keydown="onAddKey"
     />
-    <button type="submit" class="btn small primary">{{ type === 'list' ? 'Push' : 'Add' }}</button>
+    <button type="submit" class="btn small primary" :disabled="!!addProblem || busy" :title="addProblem ?? ''">{{ type === 'list' ? 'Push' : 'Add' }}</button>
     <button type="button" class="btn small" @click="adding = null">Cancel</button>
   </form>
 
@@ -280,14 +396,29 @@ const count = computed(() => {
               <textarea
                 v-if="editing.draft.includes('\n')"
                 v-model="editing.draft"
-                v-focus
+                v-focus="editing.quiet"
                 class="editor"
+                :class="{ invalid: editing.problem }"
                 rows="3"
                 :aria-label="`Edit ${c.label}`"
+                :aria-invalid="!!editing.problem"
+                :title="editing.problem"
                 @keydown="onCellKey"
                 @blur="commit"
               />
-              <input v-else v-model="editing.draft" v-focus class="editor" :aria-label="`Edit ${c.label}`" @keydown="onCellKey" @blur="commit" />
+              <input
+                v-else
+                v-model="editing.draft"
+                v-focus="editing.quiet"
+                class="editor"
+                :class="{ invalid: editing.problem }"
+                :aria-label="`Edit ${c.label}`"
+                :aria-invalid="!!editing.problem"
+                :title="editing.problem"
+                :placeholder="c.id === 'ttl' ? 'e.g. 90, 30m, 2h; empty = no expiry' : undefined"
+                @keydown="onCellKey"
+                @blur="commit"
+              />
             </template>
             <button
               v-else-if="canEdit(row, c)"
@@ -353,6 +484,9 @@ const count = computed(() => {
   margin-left: auto;
   padding: 0 4px;
   color: var(--vscode-descriptionForeground);
+}
+.hint.problem {
+  color: var(--vscode-errorForeground);
 }
 .table-area {
   flex: 1;
@@ -458,6 +592,9 @@ tr.selected .cell {
   color: var(--vscode-input-foreground);
   font: inherit;
   resize: vertical;
+}
+.editor.invalid {
+  border-color: var(--vscode-inputValidation-errorBorder);
 }
 .add-row {
   flex: none;

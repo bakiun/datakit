@@ -25,12 +25,27 @@ export interface MongoCollectionInit {
   collection: string;
   type: MongoCollectionType;
   readOnly: boolean;
-  /** Documents per page, from the Options tab. */
+  /** Documents per page: the last size picked for the data source, else the one of its Options tab. */
   pageSize: number;
   info: MongoCollectionInfo;
+  /** The choices made in the last collection tab, so a new tab starts with them. */
+  prefs: MongoCollectionPrefs;
 }
 
 export type MongoExportFormat = 'json' | 'jsonl' | 'csv';
+
+export type MongoDocumentsView = 'list' | 'table' | 'json';
+
+/** Choices a collection tab remembers for the next one. */
+export interface MongoCollectionPrefs {
+  /** How the Documents tab shows the documents. */
+  view: MongoDocumentsView;
+  /** Documents the schema analysis samples. */
+  schemaSample: number;
+  exportFormat: MongoExportFormat;
+}
+
+export const DEFAULT_MONGO_COLLECTION_PREFS: MongoCollectionPrefs = { view: 'list', schemaSample: 1000, exportFormat: 'json' };
 
 export const MONGO_EXPORT_FORMATS: readonly { value: MongoExportFormat; label: string }[] = [
   { value: 'json', label: 'JSON (array)' },
@@ -55,11 +70,14 @@ export type MongoCollectionHostMessage =
   | { type: 'loadFailed'; what: 'indexes' | 'schema' | 'info'; message: string }
   /** An edit was written; the page reloads what it shows. */
   | { type: 'written'; kind: MongoEditKind; result: MongoWriteResult }
-  /** Refused (read-only, cancelled in VS Code's confirmation) or failed on the server. */
-  | { type: 'writeFailed'; kind: MongoEditKind; message: string }
+  /**
+   * Refused (read-only, cancelled in VS Code's confirmation) or failed on the server. `cancelled` when the user said
+   * no in the confirmation: the page leaves things as they were, without an error.
+   */
+  | { type: 'writeFailed'; kind: MongoEditKind; message: string; cancelled?: boolean }
   /** The answer to a shell line; `wrote` when it may have changed data, so the page reloads. */
   | { type: 'shell'; line: string; output: string; ok: boolean; durationMs: number; database: string; wrote: boolean }
-  | { type: 'notice'; message: string };
+  | { type: 'notice'; message: string; error?: boolean };
 
 export type MongoCollectionWebviewMessage =
   | { type: 'ready' }
@@ -74,5 +92,7 @@ export type MongoCollectionWebviewMessage =
   | { type: 'shell'; line: string }
   /** Saves every document the query matches, not only the shown page. */
   | { type: 'export'; query: MongoExportQuery; format: MongoExportFormat }
-  /** Copies text the page put together; `what` is named in the confirmation. */
-  | { type: 'copy'; text: string; what: string };
+  /** Copies text the page put together; `what` is named in the status bar. */
+  | { type: 'copy'; text: string; what: string }
+  /** A choice to keep for the next tab; `pageSize` is kept for this data source. */
+  | { type: 'remember'; prefs: Partial<MongoCollectionPrefs> & { pageSize?: number } };

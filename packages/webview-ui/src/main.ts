@@ -1,4 +1,5 @@
 import { createApp, type Component } from 'vue';
+import { startSavedState } from './composables/usePersistedState';
 import DataSourceEditor from './connection/DataSourceEditor.vue';
 import KafkaWorkspace from './kafka/KafkaWorkspace.vue';
 import MongoCollection from './mongodb/MongoCollection.vue';
@@ -23,4 +24,7 @@ if (import.meta.env.DEV) {
 }
 
 const view = VIEWS[document.body.dataset.view ?? ''];
-if (view) createApp(view).mount('#app');
+if (view) {
+  startSavedState();
+  createApp(view).mount('#app');
+}

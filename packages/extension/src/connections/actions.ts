@@ -2,7 +2,10 @@ import { formatServerVersion, type DataSource, type Secrets, type ServerSession 
 import * as vscode from 'vscode';
 import { DATA_SOURCES_VIEW } from '../explorer/dataSourcesTree';
 import type { Services } from '../services';
-import { CancelledError, errorMessage } from './prompts';
+import { CancelledError, showConnectionError } from './prompts';
+
+/** How long quiet feedback stays in the status bar. */
+const STATUS_MS = 4000;
 
 function withViewProgress<T>(task: () => Promise<T>): Thenable<T> {
   return vscode.window.withProgress({ location: { viewId: DATA_SOURCES_VIEW } }, task);
@@ -16,23 +19,25 @@ async function reveal(services: Services, id: string): Promise<void> {
   }
 }
 
+/** Connects if needed, with progress on the Data Sources view; the tree is not expanded. */
+export function connectWithProgress(services: Services, id: string, overrides?: Secrets): Thenable<ServerSession> {
+  return withViewProgress(() => services.sessions.connect(id, overrides));
+}
+
 /** Connects and expands the data source in the tree. */
 export async function connectAndReveal(services: Services, id: string, overrides?: Secrets): Promise<ServerSession> {
-  const session = await withViewProgress(() => services.sessions.connect(id, overrides));
+  const session = await connectWithProgress(services, id, overrides);
   await reveal(services, id);
   return session;
 }
 
-/** Connects a data source that was just created and tells the user how it went. */
+/** Connects a data source that was just created. Success shows in the tree; a failure offers Retry and Edit. */
 export async function connectNewDataSource(services: Services, dataSource: DataSource, overrides: Secrets): Promise<void> {
   try {
     const session = await connectAndReveal(services, dataSource.id, overrides);
-    void vscode.window.showInformationMessage(
-      `Data source “${dataSource.name}” saved and connected (${formatServerVersion(session.serverVersion)}).`,
-    );
+    vscode.window.setStatusBarMessage(`$(check) Connected to “${dataSource.name}” (${formatServerVersion(session.serverVersion)})`, STATUS_MS);
   } catch (error) {
-    if (error instanceof CancelledError) return;
-    void vscode.window.showErrorMessage(`Data source “${dataSource.name}” saved, but the connection failed: ${errorMessage(error)}`);
+    showConnectionError(dataSource, error, 'datakit.connectDataSource', `Saved “${dataSource.name}”, but could not connect`);
   }
 }
 
@@ -40,10 +45,9 @@ export async function connectNewDataSource(services: Services, dataSource: DataS
 export async function refreshDataSource(services: Services, dataSource: DataSource): Promise<void> {
   try {
     await withViewProgress(() => services.sessions.reconnect(dataSource.id));
-    void vscode.window.showInformationMessage(`Refreshed “${dataSource.name}” — schema and metadata reloaded.`);
+    vscode.window.setStatusBarMessage(`$(check) Refreshed “${dataSource.name}”`, STATUS_MS);
   } catch (error) {
-    if (error instanceof CancelledError) return;
-    void vscode.window.showErrorMessage(`Refresh failed for “${dataSource.name}”: ${errorMessage(error)}`);
+    showConnectionError(dataSource, error, 'datakit.refreshDataSource', `Could not refresh “${dataSource.name}”`);
   }
 }
 
@@ -56,14 +60,17 @@ export async function refreshAll(services: Services): Promise<void> {
     return;
   }
   const results = await withViewProgress(() => Promise.allSettled(active.map((d) => sessions.reconnect(d.id))));
-  const failed = active.filter((_, i) => {
+  const failed = active.flatMap((dataSource, i) => {
     const result = results[i];
-    return result?.status === 'rejected' && !(result.reason instanceof CancelledError);
+    return result?.status === 'rejected' && !(result.reason instanceof CancelledError) ? [{ dataSource, error: result.reason as unknown }] : [];
   });
-  const refreshed = `Refreshed ${active.length} data source${active.length === 1 ? '' : 's'}`;
-  if (failed.length) {
-    void vscode.window.showWarningMessage(`${refreshed} · ${failed.length} failed (${failed.map((d) => d.name).join(', ')}).`);
+  const [first] = failed;
+  if (!first) {
+    vscode.window.setStatusBarMessage(`$(check) Refreshed ${active.length} data source${active.length === 1 ? '' : 's'}`, STATUS_MS);
+  } else if (failed.length === 1) {
+    showConnectionError(first.dataSource, first.error, 'datakit.refreshDataSource', `Could not refresh “${first.dataSource.name}”`);
   } else {
-    void vscode.window.showInformationMessage(`${refreshed}.`);
+    // Each error is shown under its data source in the tree.
+    void vscode.window.showWarningMessage(`Could not refresh ${failed.map((f) => `“${f.dataSource.name}”`).join(', ')}. The errors are shown in the tree.`);
   }
 }

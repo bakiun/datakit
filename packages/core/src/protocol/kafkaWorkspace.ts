@@ -43,6 +43,15 @@ export const KAFKA_SECTIONS: readonly { id: KafkaSection; label: string }[] = [
   { id: 'ksql', label: 'ksqlDB' },
 ];
 
+/** Choices the workspace remembers per data source; a missing one uses the default. */
+export interface KafkaWorkspacePrefs {
+  /** Messages per page in the message browser; the data source's page size until one is picked. */
+  pageSize?: number;
+  /** The last ksqlDB statement run, and where its queries start reading. */
+  ksqlStatement?: string;
+  ksqlOffsetReset?: 'earliest' | 'latest';
+}
+
 export interface KafkaWorkspaceInit {
   dataSourceName: string;
   environment: Environment;
@@ -58,6 +67,7 @@ export interface KafkaWorkspaceInit {
   connectUrl: string | null;
   ksqlDbUrl: string | null;
   favourites: string[];
+  prefs: KafkaWorkspacePrefs;
   /** Where the workspace opens, e.g. the section picked in the tree. */
   section: KafkaSection;
   topic: string | null;
@@ -88,6 +98,7 @@ export type KafkaWrite =
   /** Checks compatibility with the latest version first and refuses an incompatible schema. */
   | { kind: 'registerSchema'; subject: string; schemaType: SchemaType; schema: string }
   | { kind: 'deleteSchemaVersion'; subject: string; version: number; permanent: boolean }
+  /** `resetOffsets` stops a connector that is not stopped first, since Connect only resets stopped ones. */
   | { kind: 'connector'; name: string; action: ConnectorAction }
   | { kind: 'restartTask'; name: string; task: number }
   /** Restarts every failed connector and task. */
@@ -98,6 +109,7 @@ export type KafkaWrite =
 export type KafkaWriteKind = KafkaWrite['kind'];
 
 export type KafkaWorkspaceHostMessage =
+  /** Sent on start, and again when the data source is edited; the page then keeps its place. */
   | { type: 'init'; init: KafkaWorkspaceInit }
   | { type: 'initFailed'; message: string }
   /** The tree asked for a section, e.g. when the workspace was already open. */
@@ -134,14 +146,18 @@ export type KafkaWorkspaceHostMessage =
   | { type: 'ksqlColumns'; runId: number; columns: KsqlColumn[] }
   | { type: 'ksqlRows'; runId: number; rows: unknown[][] }
   | { type: 'ksqlDone'; runId: number; result: KsqlResult; durationMs: number }
-  | { type: 'ksqlFailed'; runId: number; message: string }
+  /** `cancelled` when the user declined the Production confirmation; the page then shows nothing. */
+  | { type: 'ksqlFailed'; runId: number; message: string; cancelled?: true }
   | { type: 'loadFailed'; what: KafkaLoad | 'topic' | 'topicConfigs' | 'brokerConfigs' | 'group' | 'schema' | 'connectorConfig'; message: string }
   /** A write worked; `message` is shown as a toast. The page reloads what it shows. */
   | { type: 'done'; kind: KafkaWriteKind; message: string }
-  /** A write did not happen: refused, cancelled in VS Code's confirmation, or failed on the server. */
-  | { type: 'failed'; kind: KafkaWriteKind; message: string }
+  /**
+   * A write did not happen: refused, or failed on the server. `cancelled` when the user declined VS Code's
+   * Production confirmation, which needs no message.
+   */
+  | { type: 'failed'; kind: KafkaWriteKind; message: string; cancelled?: true }
   | { type: 'favourites'; names: string[] }
-  | { type: 'notice'; message: string };
+  | { type: 'notice'; message: string; error?: boolean };
 
 export type KafkaWorkspaceWebviewMessage =
   | { type: 'ready' }
@@ -164,4 +180,8 @@ export type KafkaWorkspaceWebviewMessage =
   /** Saves every message of the topic to a JSON Lines file the user picks, oldest first. */
   | { type: 'dump'; topic: string }
   /** Copies text the page put together; `what` is named in the confirmation, e.g. `40 messages`. */
-  | { type: 'copy'; text: string; what: string };
+  | { type: 'copy'; text: string; what: string }
+  /** Merges into the remembered choices of the data source. */
+  | { type: 'prefs'; prefs: KafkaWorkspacePrefs }
+  /** Opens the data source's settings, e.g. to add a Schema Registry URL. */
+  | { type: 'editDataSource' };

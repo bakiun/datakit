@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import type { MongoDocument } from '@datakit/core';
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import { useCollection } from './collection';
-import { formatBytes, MOD_KEY } from './format';
+import { formatBytes } from './format';
 import ShellCode from './ShellCode.vue';
 
 /**
  * The picked document in an editor. Save replaces the whole document (its `_id` stays), Revert goes back to the read
  * text. Documents cut short (over 1 MiB) and read-only collections are shown read-only.
- * `focusRequest` focuses the editor whenever it changes, e.g. after Edit on a card.
+ * `focusRequest` focuses the editor whenever it changes, e.g. after Edit on a card. `dirty` tells the page whether
+ * there are unsaved edits, so it can ask before they would be dropped.
  */
 const props = defineProps<{ document: MongoDocument; readOnlyReason: string | null; focusRequest: number }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; deleted: []; dirty: [dirty: boolean] }>();
 const col = useCollection();
 
 const original = ref(props.document.text);
@@ -24,10 +26,21 @@ const error = ref<string | null>(null);
 /** The document changed on the server while there were edits here. */
 const stale = ref(false);
 const deleting = ref(false);
+/** A quiet “Saved” beside the buttons, until the next edit or a few seconds later. */
+const saved = ref(false);
+let savedTimer: ReturnType<typeof setTimeout> | undefined;
 const editor = ref<InstanceType<typeof ShellCode>>();
 
 const locked = computed(() => props.readOnlyReason !== null || props.document.truncated || !props.document.id);
 const dirty = computed(() => draft.value !== original.value);
+watch(dirty, (value) => {
+  emit('dirty', value);
+  if (value) saved.value = false;
+});
+onBeforeUnmount(() => {
+  clearTimeout(savedTimer);
+  emit('dirty', false);
+});
 const note = computed(() => {
   if (props.document.truncated) return 'This document is over 1 MiB: only its start is shown, and it cannot be edited here.';
   if (!props.document.id) return 'This document has no _id, so it cannot be saved.';
@@ -40,6 +53,7 @@ watch(
     original.value = draft.value = props.document.text;
     error.value = null;
     stale.value = false;
+    saved.value = false;
   },
 );
 watch(
@@ -66,7 +80,10 @@ async function save(): Promise<void> {
   if (result.ok) {
     original.value = sent;
     stale.value = false;
-  } else error.value = result.message;
+    saved.value = true;
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => (saved.value = false), 3000);
+  } else error.value = result.message || null;
 }
 
 function revert(): void {
@@ -77,7 +94,7 @@ function revert(): void {
 
 function deleteAction() {
   return col.write({ kind: 'delete', ids: [props.document.id!] }, { quiet: true }).then((result) => {
-    if (result.ok) emit('close');
+    if (result.ok) emit('deleted');
     return result;
   });
 }
@@ -101,11 +118,12 @@ function deleteAction() {
     <p v-if="stale" class="warn-line pad">The document changed on the server while you edited it. Revert to see the new version.</p>
     <p v-if="error" class="error-line pad" role="alert"><Icon name="error" :size="14" /> Not saved: {{ error }}</p>
     <div v-if="!locked" class="actions">
-      <button type="button" class="btn sm btn-primary" :disabled="!dirty || saving" :title="`Replace the document (${MOD_KEY}+Enter)`" @click="save">
+      <button type="button" class="btn sm btn-primary" :disabled="!dirty || saving" :title="`Replace the document (${SUBMIT_KEY})`" @click="save">
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
       <button type="button" class="btn sm" :disabled="(!dirty && !stale) || saving" @click="revert">Revert</button>
       <span v-if="dirty" class="t-warn changed">Changed — not saved yet</span>
+      <span v-else-if="saved" class="t-muted changed" role="status">Saved</span>
     </div>
 
     <ConfirmDialog

@@ -1,5 +1,6 @@
 import type { SshTunnel } from '@datakit/adapter-common';
 import {
+  RedisCheckError,
   sameRedisText,
   supportsFieldTtl,
   type HashRow,
@@ -35,6 +36,8 @@ export interface RawClient {
 
 /** SCAN rounds stop after this long even if fewer keys than wanted were found, so a sparse MATCH does not hang the view. */
 const SCAN_BUDGET_MS = 1500;
+/** Tries of a guarded write whose watched key changed before EXEC. */
+const WRITE_ATTEMPTS = 3;
 const LENGTH_COMMANDS: Record<string, string> = { string: 'STRLEN', hash: 'HLEN', list: 'LLEN', set: 'SCARD', zset: 'ZCARD', stream: 'XLEN' };
 /** Commands the CLI does not pass on: they would change the connection under the key browser. */
 const CLI_REFUSED = new Set(['SUBSCRIBE', 'PSUBSCRIBE', 'SSUBSCRIBE', 'MONITOR', 'SYNC', 'PSYNC', 'MULTI', 'EXEC', 'DISCARD', 'WATCH', 'UNWATCH', 'QUIT', 'RESET', 'HELLO']);
@@ -229,12 +232,26 @@ export class RedisClientSession implements RedisSession {
       await this.run(commands[0]!);
       return;
     }
+    // A watched key that changes between the checks and EXEC aborts the write. The next attempt runs the checks
+    // again, so retrying never overwrites that change.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.writeOnce(plan, commands);
+        return;
+      } catch (error) {
+        if (!(error instanceof WatchError)) throw error;
+        if (attempt === WRITE_ATTEMPTS) throw new Error('The key kept changing while it was being written, so nothing was written. Try again.');
+      }
+    }
+  }
+
+  private async writeOnce(plan: RedisWritePlan, commands: Arg[][]): Promise<void> {
     if (plan.watch.length) await this.client.watch(plan.watch.map(toArg));
     try {
       for (const check of plan.checks) {
         const reply = comparable(await this.run(check.command.map(toArg)));
         const same = typeof reply === 'object' && reply !== null && typeof check.expect === 'object' && check.expect !== null ? sameRedisText(reply, check.expect) : reply === check.expect;
-        if (!same) throw new Error(check.message);
+        if (!same) throw new RedisCheckError(check);
       }
     } catch (error) {
       await this.client.unwatch();
@@ -242,12 +259,7 @@ export class RedisClientSession implements RedisSession {
     }
     const multi = this.client.multi();
     for (const command of commands) multi.addCommand(command);
-    try {
-      await multi.exec();
-    } catch (error) {
-      if (error instanceof WatchError) throw new Error('The key changed while it was being written; reload it and try again.');
-      throw error;
-    }
+    await multi.exec();
   }
 
   async command(args: string[]): Promise<RedisReply> {

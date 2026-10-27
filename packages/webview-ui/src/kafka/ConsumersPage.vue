@@ -5,8 +5,9 @@ import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import { onHostMessage } from '../host';
 import ConfirmDialog from './ConfirmDialog.vue';
-import { groupState, lagText, num, offsetText, parseLocalTime, parseOffset, plural, totalLag } from './format';
-import { useWorkspace } from './workspace';
+import { formatTime, groupState, lagText, num, offsetText, parseLocalTime, parseOffset, plural, totalLag } from './format';
+import { describeReset } from './offsetReset';
+import { useWorkspace, type WriteResult } from './workspace';
 
 /** The consumer groups; the picked group's committed offsets can be moved, all at once or the selected partitions. */
 const ws = useWorkspace();
@@ -20,7 +21,7 @@ const selected = ref(new Set<string>());
 type TargetKind = KafkaOffsetTarget['kind'];
 const targetKind = ref<TargetKind>('earliest');
 const targetValue = ref('');
-const applying = ref(false);
+const resetting = ref(false);
 const deleting = ref(false);
 
 const readOnly = computed(() => s.init!.readOnly);
@@ -30,6 +31,13 @@ const groups = computed(() =>
 const offsets = computed(() => [...(detail.value?.offsets ?? [])].sort((a, b) => a.topic.localeCompare(b.topic) || a.partition - b.partition));
 const rowKey = (o: KafkaGroupOffset) => `${o.topic}\u0000${o.partition}`;
 const blocked = computed(() => (detail.value?.members ?? 0) > 0);
+const blockedWhy = computed(() => (blocked.value && detail.value ? `${detail.value.id} has ${plural(detail.value.members, 'active member')}; stop its consumers first` : undefined));
+
+// A time starts as the current minute, to be edited, rather than an empty field to type in full.
+watch(targetKind, (kind) => {
+  if (kind === 'timestamp' && !parseLocalTime(targetValue.value).value) targetValue.value = formatTime(Date.now()).slice(0, 16);
+  else if (kind === 'offset' && parseOffset(targetValue.value).value === null) targetValue.value = '';
+});
 const allSelected = computed(() => offsets.value.length > 0 && selected.value.size === offsets.value.length);
 
 function open(id: string): void {
@@ -84,19 +92,24 @@ const target = computed((): { target: KafkaOffsetTarget | null; problem: string 
   return { target: null, problem: null };
 });
 const scope = computed(() => (selected.value.size ? plural(selected.value.size, 'selected partition') : 'all partitions'));
+/** The partitions a reset moves: the selected ones, or else every one with a committed offset, as the host does. */
+const chosen = computed(() => (selected.value.size ? offsets.value.filter((o) => selected.value.has(rowKey(o))) : offsets.value.filter((o) => o.committed !== null)));
+const summary = computed(() => (resetting.value && target.value.target ? describeReset(chosen.value, target.value.target) : null));
 
-async function apply(): Promise<void> {
-  const d = detail.value;
-  const t = target.value.target;
-  if (!d || !t) return;
-  const partitions = selected.value.size ? offsets.value.filter((o) => selected.value.has(rowKey(o))).map((o) => ({ topic: o.topic, partition: o.partition })) : null;
-  applying.value = true;
-  const result = await ws.write({ kind: 'resetOffsets', groupId: d.id, partitions, target: t });
-  applying.value = false;
+/** A reset can make consumers read messages again or skip them, so it is confirmed first. */
+function confirmReset(): void {
+  if (detail.value && target.value.target && chosen.value.length && !blocked.value) resetting.value = true;
+}
+
+async function reset(): Promise<WriteResult> {
+  const d = detail.value!;
+  const partitions = selected.value.size ? chosen.value.map((o) => ({ topic: o.topic, partition: o.partition })) : null;
+  const result = await ws.write({ kind: 'resetOffsets', groupId: d.id, partitions, target: target.value.target! }, { quiet: true });
   if (result.ok) {
     selected.value = new Set();
     open(d.id);
   }
+  return result;
 }
 
 const deleteAction = (groupId: string) => () => ws.write({ kind: 'deleteGroup', groupId }, { quiet: true });
@@ -110,9 +123,10 @@ ws.onDone((write) => {
 const stop = onHostMessage<KafkaWorkspaceHostMessage>((message) => {
   if (message.type === 'group' && message.detail.id === picked.value) detail.value = message.detail;
   else if (message.type === 'groupGone' && message.groupId === picked.value) {
+    // The list is read again and the first group is picked; the gone one drops out of it.
     picked.value = null;
     detail.value = null;
-    ws.showToast(`Group ${message.groupId} no longer exists.`, true);
+    ws.load('groups');
   }
 });
 
@@ -181,9 +195,10 @@ onUnmounted(stop);
               :aria-label="targetKind === 'timestamp' ? 'Time' : 'Offset'"
               :placeholder="targetKind === 'timestamp' ? 'YYYY-MM-DD HH:MM' : 'offset'"
               :title="target.problem ?? undefined"
+              @keydown.enter.prevent="confirmReset"
             />
-            <button type="button" class="btn btn-primary sm" :disabled="blocked || !target.target || applying" @click="apply">{{ applying ? 'Applying…' : 'Apply' }}</button>
-            <button type="button" class="btn sm danger-text" :disabled="blocked" @click="deleting = true">Delete group</button>
+            <button type="button" class="btn btn-primary sm" :disabled="blocked || !target.target || !chosen.length" :title="blockedWhy" @click="confirmReset">Apply</button>
+            <button type="button" class="btn sm danger-text" :disabled="blocked" :title="blockedWhy" @click="deleting = true">Delete group</button>
           </div>
         </div>
         <p v-if="blocked && detail && !readOnly" class="warn-line">
@@ -223,11 +238,31 @@ onUnmounted(stop);
     </div>
 
     <ConfirmDialog
-      v-if="deleting && detail"
-      title="Delete consumer group"
-      text="Deletes the group and its committed offsets."
+      v-if="resetting && detail && summary"
+      :title="`Reset the offsets of ${detail.id}`"
       :target="detail.id"
-      primary="Delete"
+      primary="Reset offsets"
+      :action="reset"
+      @close="resetting = false"
+    >
+      <p class="lead">
+        Moves the committed offsets of {{ detail.id }} to {{ summary.to }}<template v-if="summary.value">&nbsp;<span class="mono nowrap">{{ summary.value }}</span></template>.
+        <template v-if="summary.clamped">A partition without that offset gets its nearest one.</template>
+      </p>
+      <ul class="parts">
+        <li v-for="t in summary.topics" :key="t.topic">
+          <span class="mono">{{ t.topic }}</span> <span class="t-muted">{{ t.partitions }}</span>
+        </li>
+        <li v-if="summary.more" class="t-muted">and {{ plural(summary.more, 'more topic') }}</li>
+      </ul>
+      <p class="warn-line">{{ summary.effect }}</p>
+    </ConfirmDialog>
+    <ConfirmDialog
+      v-else-if="deleting && detail"
+      :title="`Delete ${detail.id}`"
+      text="Deletes the consumer group and its committed offsets."
+      :target="detail.id"
+      primary="Delete group"
       :action="deleteAction(detail.id)"
       @close="deleting = false"
     />
@@ -261,5 +296,18 @@ onUnmounted(stop);
 .target {
   width: 160px;
   height: 26px;
+}
+.lead {
+  margin: 0;
+  line-height: 1.5;
+}
+.nowrap {
+  white-space: nowrap;
+}
+.parts {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 </style>

@@ -29,7 +29,8 @@ function pick(id: number): void {
 async function set(name: string, value: string | null): Promise<void> {
   if (picked.value === null) return;
   saving.value = name;
-  const result = await ws.write({ kind: 'setBrokerConfig', brokerId: picked.value, name, value });
+  // The table shows the new value once the settings are read again, so no toast repeats it.
+  const result = await ws.write({ kind: 'setBrokerConfig', brokerId: picked.value, name, value }, { announce: false });
   saving.value = null;
   if (result.ok) pick(picked.value);
 }

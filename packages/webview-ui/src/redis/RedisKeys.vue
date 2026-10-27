@@ -17,7 +17,7 @@ import {
   type ScanCommand,
   type StreamRow,
 } from '@datakit/core';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef } from 'vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import { onHostMessage, postToHost } from '../host';
@@ -64,7 +64,19 @@ const keyError = ref<string | null>(null);
 const creating = ref(false);
 const writing = ref(false);
 const writeError = ref<string | null>(null);
+/** Why an edit was not written when the page could handle it, e.g. it read a changed list again. */
+const writeNote = ref<string | null>(null);
 let pendingEdit: RedisEdit | null = null;
+/** An edit that met a changed value; it is offered again once the value has been read again. */
+let retryAfterLoad: RedisEdit | null = null;
+/** Show JSON as stored instead of indented; shared by the string editor and the item detail. */
+const rawView = ref(false);
+
+interface Restorable {
+  restore(edit: RedisEdit): boolean;
+}
+const valueTable = useTemplateRef<Restorable>('valueTable');
+const keyHeader = useTemplateRef<Restorable>('keyHeader');
 
 const cli = ref<CliEntry[]>([]);
 const cliBusy = ref(false);
@@ -74,6 +86,8 @@ const lastMessage = ref<{ text: string; error: boolean } | null>(null);
 let listedByKeys = false;
 /** A command from the top line that runs like a CLI line; its reply sets the message. */
 let topLineRun: string | null = null;
+/** A scan that keeps the message line, e.g. the refresh after a CLI write. */
+let quietScan = false;
 
 const post = (message: RedisKeysWebviewMessage) => postToHost(message);
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
@@ -85,6 +99,13 @@ const collection = computed((): CollectionType | null => {
 });
 const readOnly = computed(() => !!init.value?.readOnly);
 const prompt = computed(() => `${init.value?.dataSourceName ?? 'redis'}:${database.value}`);
+const filtered = computed(() => listScan.value.match !== '*' || listScan.value.type !== null);
+/** The fixed start of the listed pattern, e.g. `user:` for `user:*`, as the start of a new key's name. */
+const newKeyPrefix = computed(() => {
+  const match = listScan.value.match;
+  const fixed = match.split(/[*?[\\]/)[0]!;
+  return fixed === match ? '' : fixed;
+});
 
 /** The picked item of a collection for the detail panel. */
 const activeItem = computed((): { label: string; value: RedisText } | null => {
@@ -119,10 +140,29 @@ function scan(more = false): void {
   post({ type: 'scan', match: s.match || '*', keyType: s.type, cursor: more ? cursor.value : s.cursor, count: s.count, append: more });
 }
 
-/** Runs the command at the top: SCAN and KEYS fill the key list, anything else runs like a CLI line. */
+/** Lists every key again, without the pattern and type. */
+function showAll(): void {
+  listScan.value = { cursor: '0', match: '*', count: listScan.value.count, type: null };
+  command.value = formatScanCommand(listScan.value);
+  commandInvalid.value = false;
+  listedByKeys = false;
+  scan();
+}
+
+/** A server error of a top line command, with what to type instead when the command is unknown. */
+function commandError(output: string): string {
+  const text = output.replace(/^\(error\) /, '');
+  const unknown = /^ERR unknown command '([^']*)'/i.exec(text);
+  return unknown ? `Unknown command “${unknown[1]}”. Type a key pattern such as user:* to list keys, or a Redis command.` : text;
+}
+
+/** Runs the command at the top: a pattern, SCAN and KEYS fill the key list, anything else runs like a CLI line. */
 function runCommand(): void {
   const line = command.value.trim();
-  if (!line) return;
+  if (!line) {
+    showAll();
+    return;
+  }
   if (commandHistory[0] !== line) commandHistory.unshift(line);
   historyAt = -1;
   const parsed = parseScanCommand(splitCommandLine(line));
@@ -174,6 +214,8 @@ function pick(key: RedisText): void {
   loadingKey.value = true;
   keyError.value = null;
   writeError.value = null;
+  writeNote.value = null;
+  retryAfterLoad = null;
   post({ type: 'open', key: clone(key) });
 }
 
@@ -185,8 +227,30 @@ function refresh(): void {
 function edit(change: RedisEdit): void {
   writing.value = true;
   writeError.value = null;
+  writeNote.value = null;
   pendingEdit = change;
   post({ type: 'edit', edit: clone(change) });
+}
+
+function dismissWriteMessage(): void {
+  writeError.value = null;
+  writeNote.value = null;
+}
+
+/** Opens an edit that was not written again where it was made, so nothing typed is lost. */
+function restore(change: RedisEdit): boolean {
+  if (!('key' in change) || !sameKey(change.key, selected.value)) return false;
+  return !!(valueTable.value?.restore(change) || keyHeader.value?.restore(change));
+}
+
+/** After the value was read again because it had changed: offers the edit on the current value. */
+function retryOnCurrent(change: RedisEdit, reason: string): void {
+  void nextTick(() => {
+    const removal = change.kind.endsWith('Delete');
+    if (!restore(change)) writeNote.value = `${reason} It shows the current value now; the item could not be found again.`;
+    else if (removal) writeNote.value = `${reason} It shows the current value now, with the items selected again.`;
+    else writeNote.value = `${reason} It shows the current value now, with your edit kept: press Enter to write it, or Esc to drop it.`;
+  });
 }
 
 function moreValue(): void {
@@ -213,17 +277,20 @@ function startCreate(): void {
   writeError.value = null;
 }
 
-/** Keeps the key list in step with an edit that was written. */
+/** Keeps the key list in step with an edit that was written; after a deletion the next key is shown. */
 function applyToList(change: RedisEdit): void {
   if (change.kind === 'renameKey') {
     keys.value = keys.value.map((k) => (sameKey(k.key, change.key) ? { ...k, key: change.to } : k));
     selected.value = change.to;
   } else if (change.kind === 'deleteKeys') {
+    const at = keys.value.findIndex((k) => sameKey(k.key, selected.value));
     keys.value = keys.value.filter((k) => !change.keys.some((gone) => sameKey(gone, k.key)));
     total.value = Math.max(0, total.value - change.keys.length);
     selected.value = null;
     detail.value = null;
     page.value = null;
+    const next = at < 0 ? undefined : keys.value[Math.min(at, keys.value.length - 1)];
+    if (next) pick(next.key);
   } else if (change.kind === 'createKey') {
     keys.value = [{ key: change.key, type: change.type, ttl: change.ttl }, ...keys.value.filter((k) => !sameKey(k.key, change.key))];
     total.value++;
@@ -238,7 +305,9 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       init.value = message.init;
       database.value = message.init.database;
       databases.value = message.init.databases;
-      listScan.value = { cursor: '0', match: '*', count: message.init.scanCount, type: null };
+      // Opens on the pattern and type used last time on this data source.
+      listScan.value = { ...(message.init.lastScan ?? { match: '*', type: null, count: null }), cursor: '0' };
+      listScan.value.count ??= message.init.scanCount;
       command.value = formatScanCommand(listScan.value);
       scan();
       break;
@@ -250,14 +319,17 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       cursor.value = message.cursor;
       total.value = message.total;
       scanning.value = false;
-      showMessage(
-        `${keys.value.length.toLocaleString('en-US')} key${keys.value.length === 1 ? '' : 's'} found · ${message.cursor === '0' ? 'scan finished' : 'more to scan'}` +
-          (listedByKeys ? ' · KEYS ran as SCAN, so a large database is not blocked' : ''),
-      );
+      if (!quietScan)
+        showMessage(
+          `${keys.value.length.toLocaleString('en-US')} key${keys.value.length === 1 ? '' : 's'} found · ${message.cursor === '0' ? 'scan finished' : 'more to scan'}` +
+            (listedByKeys ? ' · KEYS ran as SCAN, so a large database is not blocked' : ''),
+        );
+      quietScan = false;
       if (selected.value === null && !creating.value && keys.value[0]) pick(keys.value[0].key);
       break;
     case 'keysFailed':
       scanning.value = false;
+      quietScan = false;
       scanError.value = message.message;
       break;
     case 'key': {
@@ -275,6 +347,10 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       next.value = 'next' in p ? p.next : null;
       loadingKey.value = false;
       keys.value = keys.value.map((k) => (sameKey(k.key, message.detail.key) ? { key: k.key, type: message.detail.type, ttl: message.detail.ttl } : k));
+      if (retryAfterLoad && !message.append) {
+        retryOnCurrent(retryAfterLoad, writeNote.value ?? '');
+        retryAfterLoad = null;
+      }
       break;
     }
     case 'keyGone':
@@ -293,15 +369,28 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       break;
     case 'written':
       writing.value = false;
+      writeNote.value = null;
       for (const command of message.commands) cli.value.push({ line: command, output: message.summary, ok: true, echo: true, durationMs: null });
       if (pendingEdit) applyToList(pendingEdit);
       pendingEdit = null;
       break;
-    case 'writeFailed':
+    case 'writeFailed': {
       writing.value = false;
+      const failed = pendingEdit;
       pendingEdit = null;
-      writeError.value = message.message;
+      if (message.reason === 'stale' && failed && 'key' in failed && sameKey(failed.key, selected.value)) {
+        // The item changed since it was loaded: read the value again, then offer the edit on what is there now.
+        writeNote.value = message.message;
+        retryAfterLoad = failed;
+        loadingKey.value = true;
+        post({ type: 'open', key: clone(selected.value!) });
+        break;
+      }
+      // A declined confirmation needs no message; what was typed comes back either way.
+      if (message.reason !== 'cancelled') writeError.value = message.message;
+      if (failed) void nextTick(() => restore(failed));
       break;
+    }
     case 'database':
       database.value = message.database;
       databases.value = message.databases;
@@ -317,12 +406,17 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
         topLineRun = null;
         commandInvalid.value = !message.ok;
         if (message.ok) showMessage(`Ran in ${message.durationMs.toFixed(1)} ms · the reply is in the CLI below.`);
-        else showMessage(message.output.replace(/^\(error\) /, ''), true);
+        else showMessage(commandError(message.output), true);
       }
       if (message.wrote && selected.value !== null) pick(selected.value);
+      // A list that was read to its end is small, so it is read again to show keys the command added or removed.
+      if (message.wrote && !scanning.value && cursor.value === '0' && listScan.value.cursor === '0') {
+        quietScan = true;
+        scan();
+      }
       break;
     case 'notice':
-      showMessage(message.message);
+      showMessage(message.message, !!message.error);
       break;
   }
 });
@@ -349,14 +443,14 @@ onUnmounted(stop);
         <input
           v-model="command"
           class="mono"
-          aria-label="Command: SCAN or KEYS lists the keys, other commands run like the CLI"
-          placeholder="SCAN 0 MATCH * COUNT 500"
+          aria-label="Command: a key pattern, SCAN or KEYS lists the keys, other commands run like the CLI"
+          placeholder="user:* or SCAN 0 MATCH user:* COUNT 500"
           spellcheck="false"
           autocomplete="off"
           @keydown="onCommandKey"
         />
       </label>
-      <IconButton icon="run" label="Run (Enter) — SCAN and KEYS list keys, other commands answer in the CLI" filled tone="ok" @click="runCommand" />
+      <IconButton icon="run" label="Run (Enter) — a key pattern, SCAN or KEYS lists keys; other commands answer in the CLI" filled tone="ok" @click="runCommand" />
       <select class="sel" aria-label="Key type" :value="listScan.type ?? ''" @change="pickType">
         <option value="">All types</option>
         <option v-for="t in REDIS_KEY_TYPES" :key="t" :value="t">{{ t }}</option>
@@ -365,7 +459,9 @@ onUnmounted(stop);
         <option v-for="d in databases" :key="d.index" :value="d.index">db{{ d.index }} · {{ d.keys.toLocaleString('en-US') }} keys</option>
       </select>
       <IconButton icon="reload" label="Scan again" :disabled="scanning" @click="refresh" />
-      <button type="button" class="btn btn-primary new" :disabled="readOnly" @click="startCreate"><Icon name="plus" :size="14" /> New key</button>
+      <button type="button" class="btn btn-primary new" :disabled="readOnly" :title="readOnly ? 'The data source is read-only' : undefined" @click="startCreate">
+        <Icon name="plus" :size="14" /> New key
+      </button>
     </div>
 
     <!-- Shows the last message until the next one replaces it, so the line never comes and goes. -->
@@ -375,16 +471,35 @@ onUnmounted(stop);
 
     <div class="body">
       <aside class="keys">
-        <KeyList :keys="keys" :selected="selected" :total="total" :cursor="cursor" :scanning="scanning" :error="scanError" @pick="pick" @more="scan(true)" />
+        <KeyList
+          :keys="keys"
+          :selected="selected"
+          :total="total"
+          :cursor="cursor"
+          :scanning="scanning"
+          :error="scanError"
+          :filtered="filtered"
+          :can-create="!readOnly"
+          @pick="pick"
+          @more="scan(true)"
+          @retry="scan()"
+          @show-all="showAll"
+          @create="startCreate"
+        />
       </aside>
       <main class="value">
-        <NewKeyForm v-if="creating" :busy="writing" :error="writeError" @create="edit" @cancel="creating = false" />
-        <p v-else-if="keyError" class="message error" role="alert"><Icon name="error" :size="14" /> {{ keyError }}</p>
+        <NewKeyForm v-if="creating" :busy="writing" :error="writeError" :prefix="newKeyPrefix" @create="edit" @cancel="creating = false" />
+        <p v-else-if="keyError" class="message error" role="alert">
+          <Icon name="error" :size="14" /> {{ keyError }}
+          <button v-if="selected !== null" type="button" class="link" @click="pick(selected)">Try again</button>
+        </p>
         <template v-else-if="detail && page && selected !== null">
-          <KeyHeader :detail="detail" :read-only="readOnly" @edit="edit" />
+          <KeyHeader ref="keyHeader" :detail="detail" :read-only="readOnly" @edit="edit" @dismiss="dismissWriteMessage" />
           <p v-if="writeError" class="message error" role="alert"><Icon name="error" :size="14" /> Not written: {{ writeError }}</p>
+          <p v-else-if="writeNote" class="message note" role="status"><Icon name="info" :size="14" /> {{ writeNote }}</p>
           <StringValue
             v-if="page.type === 'string'"
+            v-model:raw="rawView"
             :detail="detail"
             :value="page.value"
             :truncated="page.truncated"
@@ -395,6 +510,7 @@ onUnmounted(stop);
           />
           <template v-else-if="collection">
             <ValueTable
+              ref="valueTable"
               v-model:active="active"
               :key-name="selected"
               :type="collection"
@@ -405,16 +521,21 @@ onUnmounted(stop);
               :read-only="readOnly"
               :busy="writing || loadingKey"
               @edit="edit"
+              @dismiss="dismissWriteMessage"
               @more="moreValue"
               @reload="pick(selected)"
               @export="exportValue"
             />
-            <ValueDetail v-if="activeItem" :label="activeItem.label" :value="activeItem.value" @copy="post({ type: 'copy', text: $event })" />
+            <ValueDetail v-if="activeItem" v-model:raw="rawView" :label="activeItem.label" :value="activeItem.value" @copy="post({ type: 'copy', text: $event })" />
           </template>
           <p v-else-if="page.type === 'other'" class="message">{{ page.message }}</p>
         </template>
         <p v-else-if="loadingKey" class="message">Loading…</p>
-        <p v-else class="message">{{ keys.length ? 'Pick a key to see its value.' : 'No key to show.' }}</p>
+        <p v-else-if="keys.length" class="message">Pick a key to see its value.</p>
+        <p v-else-if="!scanning" class="message">
+          No key to show.
+          <button v-if="!readOnly" type="button" class="link" @click="startCreate">Create a key</button>
+        </p>
       </main>
     </div>
 
@@ -535,5 +656,20 @@ onUnmounted(stop);
 }
 .message.error {
   color: var(--vscode-errorForeground);
+}
+.message.note {
+  color: var(--vscode-foreground);
+}
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+.link:hover {
+  color: var(--vscode-textLink-activeForeground);
+  text-decoration: underline;
 }
 </style>

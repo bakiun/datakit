@@ -12,6 +12,8 @@ import {
   type TableDataWebviewMessage,
 } from '@datakit/core';
 import { computed, markRaw, reactive, ref, type Ref } from 'vue';
+import type { ActionResult } from '../components/ModalDialog.vue';
+import { isSubmitShortcut } from '../components/shortcuts';
 import { postToHost } from '../host';
 import type ScriptEditor from './ScriptEditor.vue';
 import { applyPaging, readPaging, unpaged, withoutLimit, type Paging } from './scriptClauses';
@@ -41,6 +43,10 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
   const exportFormat = ref<ExportFormat>('csv');
   const exportScope = ref<ExportScope>('page');
   const selected = ref(new Set<RowId>());
+  /** The LIMIT a query without one gets: the data source's page size, or the one picked in the grid since. */
+  const pageSize = ref(100);
+  /** Set while the user is asked whether to drop the pending grid edits for an action, e.g. Run. */
+  const discardPrompt = ref<{ text: string; primary: string; proceed: () => void } | null>(null);
 
   const dialect = computed<SqlDialect>(() => init.value?.dialect ?? 'mysql');
   const changes = useTableChanges(page);
@@ -48,14 +54,15 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
   const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
   const pending = computed(() => changes.count.value);
-  const locked = computed(() => pending.value > 0 || loading.value || submitting.value);
+  const busy = computed(() => loading.value || submitting.value);
+  const locked = computed(() => pending.value > 0 || busy.value);
   /** Sorting and paging of the shown query, read from its ORDER BY and LIMIT. */
   const paging = computed(() =>
     page.value && isPageableQuery(page.value.statement.text, dialect.value) ? readPaging(page.value.statement.text, dialect.value) : null,
   );
   const sort = computed(() => paging.value?.sort ?? []);
   const pageable = computed(() => paging.value !== null && paging.value.limit !== null);
-  const limit = computed(() => paging.value?.limit ?? init.value?.pageSize ?? 100);
+  const limit = computed(() => paging.value?.limit ?? pageSize.value);
   const offset = computed(() => paging.value?.offset ?? 0);
   const total = computed(() => page.value?.total ?? null);
   const rowCount = computed(() => page.value?.rows.length ?? 0);
@@ -66,6 +73,15 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
   const readOnly = computed(() => page.value?.readOnlyReason ?? null);
   const rowIds = computed(() => [...changes.inserts.value.map((r) => r.id), ...(page.value?.rows.map((_, i) => existingRowId(i)) ?? [])]);
   const selection = computed(() => rowIds.value.filter((id) => selected.value.has(id)));
+  /** Every selected row is marked for deletion, so the delete button brings them back instead. */
+  const selectionDeleted = computed(() => selection.value.length > 0 && selection.value.every((id) => changes.isDeleted(id)));
+  /** Why the rows cannot be paged, sorted or reloaded now, for the tooltips of those controls; null when they can. */
+  const pagingOff = computed<string | null>(() => {
+    if (!page.value) return null;
+    if (pending.value) return 'submit or revert your changes first';
+    if (!paging.value) return 'only SELECT results can be paged and sorted';
+    return paging.value.limit === null ? 'add a LIMIT to the query to page it' : null;
+  });
 
   /** What the last run showed: rows, timing and the rest of the script. Errors are shown apart. */
   const runInfo = computed(() => {
@@ -89,18 +105,33 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     return { ...part, unpaged: unpaged(part.text, dialect.value), unlimited: withoutLimit(part.text, dialect.value) };
   }
 
+  /** What the views do with a new TableDataInit. */
+  function start(value: TableDataInit): void {
+    autoCommit.value = value.autoCommit;
+    pageSize.value = value.pageSize;
+    exportFormat.value = value.exportFormat;
+    exportScope.value = value.exportScope;
+  }
+
   /**
    * Runs the script, or the selection. The last query gets a LIMIT if it has none, so a big table is never read in full.
-   * `record: false` keeps the statements out of the query history.
+   * `record: false` keeps the statements out of the query history. With grid edits not written yet, it asks first
+   * whether to drop them.
    */
   function run(options: { record?: boolean } = {}): void {
-    if (locked.value || !editor.value) return;
+    if (busy.value || !editor.value) return;
+    if (pending.value) {
+      const n = pending.value;
+      const text = `${n} change${n === 1 ? '' : 's'} in the grid ${n === 1 ? 'is' : 'are'} not written yet. Running the script shows new rows and drops ${n === 1 ? 'it' : 'them'}.`;
+      discardPrompt.value = { text, primary: 'Discard and Run', proceed: () => run(options) };
+      return;
+    }
     const source = editor.value.selection() ?? { from: 0, text: script.value };
     let parts = splitSqlScript(source.text, dialect.value).map((p) => ({ text: p.text, from: source.from + p.from, to: source.from + p.to }));
     if (!parts.length) return;
     const last = [...parts].reverse().find((p) => isPageableQuery(p.text, dialect.value));
     if (last && readPaging(last.text, dialect.value).limit === null) {
-      const text = applyPaging(last.text, dialect.value, { limit: init.value?.pageSize ?? 100, offset: 0 });
+      const text = applyPaging(last.text, dialect.value, { limit: pageSize.value, offset: 0 });
       editor.value.replace(last.from, last.to, text);
       const shift = text.length - last.text.length;
       parts = parts.map((p) => (p === last ? { ...p, text, to: p.from + text.length } : p.from > last.from ? { ...p, from: p.from + shift, to: p.to + shift } : p));
@@ -110,6 +141,17 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     failedAt.value = null;
     editor.value.mark();
     post({ type: 'run', statements: parts.map(statementOf), autoCommit: autoCommit.value, ...(options.record === false ? { record: false } : {}) });
+  }
+
+  /** The primary action of the discard prompt: drops the grid edits and does what was asked. */
+  async function discardAndProceed(): Promise<ActionResult> {
+    const prompt = discardPrompt.value;
+    discardPrompt.value = null;
+    changes.reset();
+    selected.value = new Set();
+    submitError.value = null;
+    prompt?.proceed();
+    return { ok: true, message: '' };
   }
 
   /**
@@ -135,16 +177,21 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
 
   /**
    * Rewrites the ORDER BY or LIMIT of the shown query in the script and runs it again. A query edited since it ran
-   * runs as Run would run it, so it goes into the history too.
+   * runs as Run would run it, so it goes into the history too. A query no longer in the script, e.g. replaced by
+   * another statement, is paged as it was shown, and the script is left alone.
    */
   function repage(change: PagingChange | ((paging: Paging) => PagingChange)): void {
     if (!page.value || !editor.value || locked.value) return;
     const target = shownQuery();
+    const paged = (text: string) => applyPaging(text, dialect.value, typeof change === 'function' ? change(readPaging(text, dialect.value)) : change);
     if (!target) {
-      showNotice('The shown query is no longer in the script; press Run.');
+      const shown = page.value.statement;
+      loading.value = true;
+      runError.value = null;
+      post({ type: 'query', statement: statementOf({ text: paged(shown.text), from: shown.from, to: shown.to }) });
       return;
     }
-    const text = applyPaging(target.text, dialect.value, typeof change === 'function' ? change(readPaging(target.text, dialect.value)) : change);
+    const text = paged(target.text);
     editor.value.replace(target.from, target.to, text);
     editor.value.mark();
     const statement = statementOf({ text, from: target.from, to: target.from + text.length });
@@ -184,16 +231,21 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
       } else {
         next = [{ column, direction: 'asc' }];
       }
-      return { sort: next, limit: paging.limit ?? init.value?.pageSize ?? 100, offset: 0 };
+      return { sort: next, limit: paging.limit ?? pageSize.value, offset: 0 };
     });
   }
 
+  /** A page size picked in the grid; it is kept for the next runs and the next views of the data source. */
   function setLimit(value: number): void {
+    pageSize.value = value;
     repage({ limit: value, offset: 0 });
+    post({ type: 'pageSize', pageSize: value });
   }
 
+  /** Marks the selected rows for deletion, or brings them back when all of them are marked already. */
   function deleteSelected(): void {
-    changes.remove(selection.value);
+    if (selectionDeleted.value) changes.restore(selection.value);
+    else changes.remove(selection.value);
     selected.value = new Set();
   }
 
@@ -236,9 +288,9 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     noticeTimer = setTimeout(() => (notice.value = ''), 4000);
   }
 
-  /** Ctrl/Cmd+Enter outside the editor submits grid changes, or runs the script. */
+  /** ⌘Enter (Ctrl+Enter off macOS) outside the editor submits grid changes, or runs the script. */
   function onKey(event: KeyboardEvent): void {
-    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey)) return;
+    if (!isSubmitShortcut(event)) return;
     if ((event.target as HTMLElement).closest('.cm-editor')) return;
     event.preventDefault();
     if (pending.value) submit();
@@ -273,6 +325,11 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
         submitting.value = false;
         submitError.value = message.message;
         return true;
+      case 'declined':
+        loading.value = false;
+        submitting.value = false;
+        showNotice(message.message);
+        return true;
       case 'transaction':
         transaction.value = { open: message.open, changes: message.changes };
         return true;
@@ -299,10 +356,13 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     exportFormat,
     exportScope,
     selected,
+    pageSize,
+    discardPrompt,
     dialect,
     // The grid calls its functions; it stays a plain object so its refs keep their type.
     changes: markRaw(changes),
     pending,
+    busy,
     locked,
     sort,
     pageable,
@@ -317,9 +377,13 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     readOnly,
     rowIds,
     selection,
+    selectionDeleted,
+    pagingOff,
     runInfo,
     post,
+    start,
     run,
+    discardAndProceed,
     repage,
     reload,
     sortBy,

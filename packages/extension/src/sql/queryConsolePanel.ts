@@ -3,6 +3,7 @@ import {
   isPostgresSession,
   leadingKeyword,
   quoteIdentifier,
+  readPanelRef,
   type ConsoleInit,
   type PostgresSession,
   type ScriptStatement,
@@ -26,6 +27,7 @@ const SAVE_DELAY_MS = 400;
  * also has a schema, which comes first in the search path.
  */
 export class QueryConsolePanel extends SqlViewPanel {
+  static readonly viewType = 'datakit.queryConsole';
   private static readonly panels = new Map<string, QueryConsolePanel>();
   private static readonly loaded = new vscode.EventEmitter<string>();
   /** Fires with the console id when a console page has started; lets the tests check the whole path. */
@@ -45,6 +47,18 @@ export class QueryConsolePanel extends SqlViewPanel {
     const created = await services.consoles.create(dataSourceId, database, script, schema);
     QueryConsolePanel.show(services, created.id);
     return created;
+  }
+
+  /**
+   * Builds the console again on a tab VS Code restores after a reload of the window; its script is in its file.
+   * False when the console or its data source is gone, or the console is open already.
+   */
+  static restore(services: Services, panel: vscode.WebviewPanel, state: unknown): boolean {
+    const ref = readPanelRef.queryConsole(state);
+    const queryConsole = ref && services.consoles.get(ref.consoleId);
+    if (!queryConsole || !services.store.get(queryConsole.dataSourceId) || QueryConsolePanel.panels.has(queryConsole.id)) return false;
+    new QueryConsolePanel(services, queryConsole.id, panel);
+    return true;
   }
 
   /** Hands a message to a console as if its page had sent it; used by the tests. */
@@ -91,9 +105,10 @@ export class QueryConsolePanel extends SqlViewPanel {
   private constructor(
     services: Services,
     private readonly consoleId: string,
+    restored?: vscode.WebviewPanel,
   ) {
     const queryConsole = services.consoles.get(consoleId)!;
-    super(services, queryConsole.dataSourceId, 'queryConsole', QueryConsolePanel.title(services, queryConsole), 'console.svg');
+    super(services, queryConsole.dataSourceId, 'queryConsole', QueryConsolePanel.title(services, queryConsole), 'console.svg', { consoleId }, restored);
     this.database = queryConsole.database;
     this.schema = queryConsole.schema ?? null;
     this.panel.onDidChangeViewState(({ webviewPanel }) => {
@@ -134,6 +149,12 @@ export class QueryConsolePanel extends SqlViewPanel {
 
   protected currentDatabase(): string | null {
     return this.database;
+  }
+
+  /** MySQL without a database selected: says where to pick one. */
+  protected override errorText(error: unknown): string {
+    if (this.postgres || this.database || !/^No database selected\.?$/i.test(errorMessage(error))) return super.errorText(error);
+    return 'No database selected. Pick one in the Source list above, or write the table as database.table.';
   }
 
   /** A PostgreSQL console connects to its database. */
@@ -212,11 +233,12 @@ export class QueryConsolePanel extends SqlViewPanel {
           readOnly: dataSource.options.readOnly,
           structure: null,
           console: consoleInit,
-          pageSize: dataSource.options.pageSize,
+          pageSize: this.pageSize(dataSource),
           script: this.unsaved ?? (await this.services.consoles.read(queryConsole)),
           editorHeight: this.services.context.globalState.get<number>(EDITOR_HEIGHT_KEY) ?? null,
           tables: await this.tables(session),
           autoCommit: dataSource.options.autoCommit,
+          ...this.exportChoice(),
         },
       });
       SqlViewPanel.updateStatusBar();

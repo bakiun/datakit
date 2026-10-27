@@ -5,6 +5,8 @@ import {
   leadingKeyword,
   parseEnumValues,
   type ColumnInfo,
+  type ExportFormat,
+  type ExportScope,
   type ScriptStatement,
   type TableDataHostMessage,
   type TableDataWebviewMessage,
@@ -16,7 +18,8 @@ import { readPaging } from '../sql/scriptClauses';
  * Plays the extension for the table data view (or, with `console`, the query console) on the dev server,
  * with an in-memory `orders` table; `&postgres` shows it as a PostgreSQL table in schema `public`.
  * Queries on `orders` honour a simple `WHERE column = value`, ORDER BY and LIMIT; other writes report one row.
- * A statement containing `fail` fails.
+ * A statement containing `fail` fails; a script containing `decline` plays a declined production confirmation.
+ * `&initfail` plays a data source that cannot be connected to.
  */
 type Row = Record<string, string | null>;
 
@@ -191,6 +194,10 @@ export function installTableDataHost(
   return (message) => {
     switch (message.type) {
       case 'ready':
+        if (params.has('initfail')) {
+          reply({ type: 'initFailed', message: 'Could not connect to “shop-prod”: connect ECONNREFUSED 127.0.0.1:3306', connection: true }, 300);
+          break;
+        }
         reply({
           type: 'init',
           init: {
@@ -213,10 +220,16 @@ export function installTableDataHost(
             editorHeight: Number(localStorage.getItem(asConsole ? 'consoleHeight' : 'editorHeight')) || null,
             tables: ['customers', 'order_items', 'orders', 'payments', 'products'],
             autoCommit: true,
+            exportFormat: (localStorage.getItem('exportFormat') as ExportFormat | null) ?? 'csv',
+            exportScope: (localStorage.getItem('exportScope') as ExportScope | null) ?? 'page',
           },
         });
         break;
       case 'run': {
+        if (message.statements.some((s) => /decline/i.test(s.text))) {
+          reply({ type: 'declined', message: 'Nothing was run.' }, 200);
+          break;
+        }
         const done: string[] = [];
         let last: ScriptStatement | undefined;
         for (const statement of message.statements) {
@@ -274,6 +287,8 @@ export function installTableDataHost(
         break;
       }
       case 'export':
+        localStorage.setItem('exportFormat', message.format);
+        localStorage.setItem('exportScope', message.scope);
         reply({ type: 'notice', message: `Saved ${shown.length} rows to orders.${message.format}.` }, 200);
         break;
       case 'copySql':
@@ -333,6 +348,8 @@ export function installTableDataHost(
       case 'stop':
       case 'viewDdl':
       case 'txMode':
+      case 'pageSize':
+      case 'editDataSource':
         console.info('[dev host]', message.type);
         break;
     }

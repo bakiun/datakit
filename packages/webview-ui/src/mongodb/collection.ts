@@ -2,6 +2,7 @@ import type {
   MongoCollectionHostMessage,
   MongoCollectionInfo,
   MongoCollectionInit,
+  MongoCollectionPrefs,
   MongoCollectionWebviewMessage,
   MongoEdit,
   MongoEditKind,
@@ -14,6 +15,7 @@ import { computed, inject, provide, reactive, type InjectionKey } from 'vue';
 import type { ActionResult } from '../components/ModalDialog.vue';
 import type { Toast } from '../components/ToastNote.vue';
 import { onHostMessage, postToHost } from '../host';
+import { filterFields } from './shellSyntax';
 
 /**
  * State shared by the tabs of one collection: what the host sent about it, the writes waiting for their answer, the
@@ -25,6 +27,8 @@ export type Tab = 'documents' | 'aggregation' | 'indexes' | 'schema';
 export interface ExplainView {
   /** What was explained, e.g. `find` or `aggregate`. */
   title: string;
+  /** The fields a find filters on, for an index the dialog can offer to create. */
+  fields: string[];
   loading: boolean;
   explain: MongoExplain | null;
   error: string | null;
@@ -54,7 +58,10 @@ export interface CollectionState {
   errors: Partial<Record<Load, string>>;
   explain: ExplainView | null;
   toast: Toast | null;
-  shell: { entries: ShellEntry[]; busy: boolean; database: string };
+  /** `running` is the line the shell runs now. */
+  shell: { entries: ShellEntry[]; busy: boolean; database: string; open: boolean; running: string };
+  /** Asks the Indexes tab to open Create index with these keys, e.g. from Explain. */
+  createIndex: { keys: string } | null;
   /**
    * Bumped by every write that may change the documents or the indexes, from the page or the shell. A tab compares
    * it with the version it last read, so it reads again when it is shown.
@@ -64,6 +71,11 @@ export interface CollectionState {
 }
 
 const DOCUMENT_EDITS: ReadonlySet<MongoEditKind> = new Set(['insert', 'replace', 'setField', 'unsetField', 'delete', 'deleteMatching', 'updateMatching']);
+/**
+ * Writes whose result shows where they were made (the cell, the document pane, the card that goes, the index row),
+ * so they need no toast. Inserts and writes by filter say what they did: the counts are not on show anywhere else.
+ */
+const SHOWN_IN_PLACE: ReadonlySet<MongoEditKind> = new Set(['replace', 'setField', 'unsetField', 'delete', 'createIndex', 'dropIndex', 'hideIndex']);
 
 export function createCollection() {
   const state = reactive<CollectionState>({
@@ -78,7 +90,8 @@ export function createCollection() {
     errors: {},
     explain: null,
     toast: null,
-    shell: { entries: [], busy: false, database: '' },
+    shell: { entries: [], busy: false, database: '', open: false, running: '' },
+    createIndex: null,
     documentsVersion: 0,
     indexesVersion: 0,
   });
@@ -135,26 +148,42 @@ export function createCollection() {
   }
 
   function explain(query: MongoFindQuery | { pipeline: string }, title: string): void {
-    state.explain = { title, loading: true, explain: null, error: null };
+    state.explain = { title, fields: 'filter' in query ? filterFields(query.filter) : [], loading: true, explain: null, error: null };
     post({ type: 'explain', query });
   }
 
-  function runShell(line: string): void {
+  /** Lines waiting for the shell, which runs one at a time, e.g. `use` and then a pipeline. */
+  const shellQueue: string[] = [];
+
+  /** Runs a shell line, after the ones before it; `show` opens the shell so its answer can be seen. */
+  function runShell(line: string, show = false): void {
+    if (show) state.shell.open = true;
+    if (state.shell.busy) {
+      shellQueue.push(line);
+      return;
+    }
     state.shell.busy = true;
+    state.shell.running = line;
     post({ type: 'shell', line });
+  }
+
+  /** Keeps a choice for the next tab. */
+  function remember(prefs: Partial<MongoCollectionPrefs> & { pageSize?: number }): void {
+    post({ type: 'remember', prefs });
   }
 
   function copy(text: string, what: string): void {
     post({ type: 'copy', text, what });
   }
 
-  function settle(kind: MongoEditKind, ok: boolean, message: string): void {
+  /** A cancelled write (the user said no in VS Code's confirmation) leaves everything as it was, without an error. */
+  function settle(kind: MongoEditKind, ok: boolean, message: string, cancelled = false): void {
     const entry = pending.get(kind)?.shift();
     if (ok) {
-      showToast(message);
+      if (!SHOWN_IN_PLACE.has(kind)) showToast(message);
       changed(DOCUMENT_EDITS.has(kind), !DOCUMENT_EDITS.has(kind));
-    } else if (!entry?.quiet) showToast(message, true);
-    entry?.resolve({ ok, message });
+    } else if (!entry?.quiet && !cancelled) showToast(message, true);
+    entry?.resolve({ ok, message: cancelled ? '' : message });
   }
 
   function handle(message: MongoCollectionHostMessage): void {
@@ -163,6 +192,7 @@ export function createCollection() {
         state.init = message.init;
         state.initError = null;
         state.info = message.init.info;
+        state.schemaSample = message.init.prefs.schemaSample;
         state.shell.database = message.init.database;
         if (message.init.type === 'view' && state.tab === 'indexes') state.tab = 'documents';
         break;
@@ -195,7 +225,7 @@ export function createCollection() {
         settle(message.kind, true, message.result.summary);
         break;
       case 'writeFailed':
-        settle(message.kind, false, message.message);
+        settle(message.kind, false, message.message, message.cancelled);
         break;
       case 'shell':
         state.shell.busy = false;
@@ -204,9 +234,10 @@ export function createCollection() {
         if (state.shell.entries.length > 200) state.shell.entries.splice(0, state.shell.entries.length - 200);
         state.shell.database = message.database;
         if (message.wrote) changed(true, true);
+        if (shellQueue.length) runShell(shellQueue.shift()!);
         break;
       case 'notice':
-        showToast(message.message);
+        showToast(message.message, !!message.error);
         break;
       case 'page':
       case 'pageFailed':
@@ -217,7 +248,7 @@ export function createCollection() {
 
   const stop = onHostMessage<MongoCollectionHostMessage>(handle);
 
-  return { state, readOnlyReason, canWrite, post, nextRequestId, load, write, explain, runShell, copy, showToast, stop };
+  return { state, readOnlyReason, canWrite, post, nextRequestId, load, write, explain, runShell, remember, copy, showToast, stop };
 }
 
 export type Collection = ReturnType<typeof createCollection>;

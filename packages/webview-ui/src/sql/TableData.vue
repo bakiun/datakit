@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { TableDataHostMessage, TableDataInit } from '@datakit/core';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import ResizeHandle from '../components/ResizeHandle.vue';
+import { SUBMIT_KEY } from '../components/shortcuts';
 import { onHostMessage } from '../host';
 import ResultPanel from './ResultPanel.vue';
 import ScriptEditor from './ScriptEditor.vue';
@@ -13,6 +15,8 @@ import { useSqlView } from './useSqlView';
 /** The data view of a table: a SQL script whose last query fills the grid, and the Structure tab. */
 const init = ref<TableDataInit | null>(null);
 const initError = ref<string | null>(null);
+/** The data source could not be connected to; the error offers its settings next to Retry. */
+const initConnection = ref(false);
 const script = ref('');
 const editor = ref<InstanceType<typeof ScriptEditor>>();
 const view = useSqlView(init, editor, script);
@@ -44,12 +48,22 @@ function applyStructure(statements: string[]): void {
   view.post({ type: 'alterTable', statements });
 }
 
+/** Why the Structure tab cannot end the open transaction now. */
+const endBlocked = computed(() => (view.pending ? 'Submit or revert the grid changes on the Data tab first' : view.loading ? 'A query is running' : null));
+
+/** ⌘Enter (Ctrl+Enter off macOS) runs or submits on the Data tab; the Structure tab applies with its button only. */
+function onKey(event: KeyboardEvent): void {
+  if (mode.value === 'data') view.onKey(event);
+}
+
 const stop = onHostMessage<TableDataHostMessage>((message) => {
+  // A declined production confirmation of a structure change ends the wait for it too.
+  if (message.type === 'declined') applying.value = false;
   if (view.handle(message)) return;
   switch (message.type) {
     case 'init':
       init.value = message.init;
-      view.autoCommit = message.init.autoCommit;
+      view.start(message.init);
       script.value = message.init.script;
       editorHeight.value = Math.max(MIN_EDITOR_HEIGHT, Math.min(message.init.editorHeight ?? DEFAULT_EDITOR_HEIGHT, maxEditorHeight()));
       // The query the view opens with is not something the user ran, so it stays out of the history.
@@ -57,6 +71,7 @@ const stop = onHostMessage<TableDataHostMessage>((message) => {
       break;
     case 'initFailed':
       initError.value = message.message;
+      initConnection.value = message.connection === true;
       break;
     case 'structure':
       if (init.value) init.value = { ...init.value, structure: message.structure };
@@ -78,18 +93,21 @@ function retry(): void {
 
 onMounted(() => {
   view.post({ type: 'ready' });
-  window.addEventListener('keydown', view.onKey);
+  window.addEventListener('keydown', onKey);
 });
 onUnmounted(() => {
   stop();
-  window.removeEventListener('keydown', view.onKey);
+  window.removeEventListener('keydown', onKey);
 });
 </script>
 
 <template>
   <div v-if="initError" class="failed">
     <p role="alert"><Icon name="error" :size="14" /> {{ initError }}</p>
-    <button type="button" class="btn" @click="retry">Retry</button>
+    <div class="failed-actions">
+      <button type="button" class="btn btn-primary" @click="retry">Retry</button>
+      <button v-if="initConnection" type="button" class="btn" @click="view.post({ type: 'editDataSource' })">Edit Data Source</button>
+    </div>
   </div>
   <div v-else-if="!init || !structure" class="opening note">Opening table…</div>
   <div v-else class="table-data">
@@ -101,7 +119,7 @@ onUnmounted(() => {
       </nav>
       <span v-if="view.notice" role="status" class="notice">{{ view.notice }}</span>
       <div v-if="mode === 'data'" class="actions">
-        <IconButton icon="run" label="Run (Ctrl+Enter) — the selection if there is one" filled tone="ok" :disabled="view.locked" @click="view.run()" />
+        <IconButton icon="run" :label="`Run (${SUBMIT_KEY}) — the selection if there is one`" filled tone="ok" :disabled="view.busy" @click="view.run()" />
         <IconButton icon="external" label="Open in query console" @click="view.post({ type: 'openConsole', script })" />
         <IconButton icon="copy" label="Copy SQL" @click="view.post({ type: 'copySql', sql: script })" />
       </div>
@@ -134,9 +152,21 @@ onUnmounted(() => {
       :tables="init.tables"
       :applying="applying"
       :error="alterError"
+      :open-transaction="view.transaction.open ? view.transaction.changes : null"
+      :end-blocked="endBlocked"
       @apply="applyStructure"
       @copy="view.post({ type: 'copySql', sql: $event })"
       @view-ddl="view.post({ type: 'viewDdl' })"
+      @end-transaction="view.endTransaction"
+    />
+
+    <ConfirmDialog
+      v-if="view.discardPrompt"
+      title="Discard unsaved changes?"
+      :text="view.discardPrompt.text"
+      :primary="view.discardPrompt.primary"
+      :action="view.discardAndProceed"
+      @close="view.discardPrompt = null"
     />
   </div>
 </template>
@@ -151,6 +181,10 @@ onUnmounted(() => {
 .opening,
 .failed {
   padding: 24px 28px;
+}
+.failed-actions {
+  display: flex;
+  gap: 8px;
 }
 .failed p {
   display: flex;

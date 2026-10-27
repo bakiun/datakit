@@ -1,37 +1,76 @@
-import { describeEndpoint, type DataSource } from '@datakit/core';
+import { describeEndpoint, type DataSource, type EngineId } from '@datakit/core';
 import * as vscode from 'vscode';
-import { DataSourceNode, KafkaSectionNode, MongoCollectionNode, ObjectNode, RedisDatabaseNode } from '../explorer/nodes';
+import { DataSourceNode, EnvironmentNode, KafkaSectionNode, MongoCollectionNode, ObjectNode, RedisDatabaseNode } from '../explorer/nodes';
 import { KafkaWorkspacePanel } from '../kafka/kafkaWorkspacePanel';
 import { MongoCollectionPanel } from '../mongodb/mongoCollectionPanel';
 import { RedisKeysPanel } from '../redis/redisKeysPanel';
 import { SqlViewPanel } from '../sql/sqlViewPanel';
 import { TableDataPanel } from '../sql/tableDataPanel';
 import type { Services } from '../services';
-import { connectAndReveal, refreshAll, refreshDataSource } from './actions';
+import { connectAndReveal, connectWithProgress, refreshAll, refreshDataSource } from './actions';
 import { DataSourceEditor } from './dataSourceEditor';
-import { CancelledError, errorMessage } from './prompts';
+import { showConnectionError } from './prompts';
 
-/** The data source a command applies to: the tree node it was run on, or one picked from a list. */
-export async function target(services: Services, node: unknown): Promise<DataSource | undefined> {
-  if (node instanceof DataSourceNode) return services.store.get(node.id);
-  const dataSources = services.store.list();
-  if (!dataSources.length) {
-    void vscode.window.showInformationMessage('No data sources yet.');
+export interface TargetOptions {
+  /** Only the data sources this accepts are offered. */
+  accept?: (dataSource: DataSource) => boolean;
+  /** Shown when no data source is accepted; “No data sources yet.” by default. */
+  none?: string;
+  /** The engine the New Data Source button of that message starts with; `false` shows no button. */
+  newEngine?: EngineId | false;
+}
+
+/** The data source a command argument names: a data source id, its tree node, or a node under it. */
+function dataSourceIdOf(node: unknown): string | undefined {
+  if (typeof node === 'string') return node;
+  for (let current = node, depth = 0; current && typeof current === 'object' && depth < 10; depth++) {
+    if (current instanceof DataSourceNode) return current.id;
+    current = (current as { parent?: unknown }).parent;
+  }
+  return undefined;
+}
+
+/** The data source picked last from the list, offered first next time. */
+let lastPicked: string | undefined;
+
+/**
+ * The data source a command applies to: the one the tree node or id names, or, from the Command Palette, the only
+ * one that fits or one picked from a list that starts with the tree's selection and the last pick.
+ */
+export async function target(services: Services, node: unknown, options: TargetOptions = {}): Promise<DataSource | undefined> {
+  const id = dataSourceIdOf(node);
+  if (id) return services.store.get(id);
+  const candidates = services.store.list().filter(options.accept ?? (() => true));
+  if (!candidates.length) {
+    const newEngine = options.newEngine;
+    const message = options.none ?? 'No data sources yet.';
+    if (newEngine === false) void vscode.window.showInformationMessage(message);
+    else {
+      void vscode.window.showInformationMessage(message, 'New Data Source').then((choice) => {
+        if (choice) DataSourceEditor.show(services, undefined, newEngine ? { engine: newEngine } : undefined);
+      });
+    }
     return undefined;
   }
+  if (candidates.length === 1) return candidates[0];
+  const selected = dataSourceIdOf(services.view.selection[0]);
+  const rank = (d: DataSource) => (d.id === selected ? 0 : d.id === lastPicked ? 1 : 2);
   const picked = await vscode.window.showQuickPick(
-    dataSources.map((d) => ({ label: d.name, description: describeEndpoint(d), dataSource: d })),
-    { placeHolder: 'Select a data source' },
+    [...candidates].sort((a, b) => rank(a) - rank(b)).map((d) => ({ label: d.name, description: describeEndpoint(d), dataSource: d })),
+    { placeHolder: 'Select a data source', matchOnDescription: true },
   );
+  if (picked) lastPicked = picked.dataSource.id;
   return picked?.dataSource;
 }
 
-async function confirmDelete(dataSource: DataSource): Promise<boolean> {
+async function confirmDelete(services: Services, dataSource: DataSource): Promise<boolean> {
+  const consoles = services.consoles.list(dataSource.id).length;
+  const removed = consoles ? `Its ${consoles} console${consoles === 1 ? '' : 's'}, query history` : 'Its query history';
   const choice = await vscode.window.showWarningMessage(
     `Delete data source “${dataSource.name}”?`,
     {
       modal: true,
-      detail: 'The connection settings and saved passwords are removed. Data on the server is not touched.',
+      detail: `${removed} and saved passwords are removed too. Data on the server is not touched.`,
     },
     'Delete',
   );
@@ -61,26 +100,56 @@ function openData(services: Services, node: unknown): void {
   TableDataPanel.show(services, { ...node.parent.location, table: node.name });
 }
 
+/**
+ * Opens the key browser of a Redis data source on the database its settings name (db0 when they name none). It
+ * connects first, so a password is asked once and the tree shows the connection. An open key browser is brought to
+ * the front on the database it shows, without connecting.
+ */
+async function browseKeys(services: Services, dataSource: DataSource): Promise<void> {
+  if (dataSource.engine !== 'redis' || RedisKeysPanel.reveal(dataSource.id)) return;
+  try {
+    await connectWithProgress(services, dataSource.id);
+  } catch (error) {
+    showConnectionError(dataSource, error, 'datakit.openRedisKeys');
+    return;
+  }
+  RedisKeysPanel.show(services, dataSource.id);
+}
+
 export function registerDataSourceCommands(services: Services): vscode.Disposable[] {
   let lastClick: { id: string; time: number } | undefined;
   const { store, sessions, tree } = services;
-  const command = (id: string, run: (dataSource: DataSource) => Promise<void> | void) =>
+  const command = (id: string, run: (dataSource: DataSource) => Promise<void> | void, options?: TargetOptions) =>
     vscode.commands.registerCommand(id, async (node?: unknown) => {
-      const dataSource = await target(services, node);
+      const dataSource = await target(services, node, options);
       if (dataSource) await run(dataSource);
     });
+  const isActive = (d: DataSource) => sessions.status(d.id) === 'connected' || sessions.status(d.id) === 'connecting';
 
   return [
-    vscode.commands.registerCommand('datakit.addDataSource', () => DataSourceEditor.show(services)),
+    // Run on an environment folder, the new data source starts in that environment.
+    vscode.commands.registerCommand('datakit.addDataSource', (node?: unknown) =>
+      DataSourceEditor.show(services, undefined, node instanceof EnvironmentNode ? { environment: node.environment } : undefined),
+    ),
     vscode.commands.registerCommand('datakit.refreshAll', () => refreshAll(services)),
     vscode.commands.registerCommand('datakit.openTableData', (node?: unknown) => openData(services, node)),
-    vscode.commands.registerCommand('datakit.openRedisKeys', (node?: unknown) => openData(services, node)),
-    command('datakit.openKafkaWorkspace', (d) => {
-      if (d.engine !== 'kafka') {
-        void vscode.window.showInformationMessage(`“${d.name}” is not a Kafka data source.`);
+    // On a database node it opens that database; on a data source, or from the Command Palette, the configured one.
+    vscode.commands.registerCommand('datakit.openRedisKeys', async (node?: unknown) => {
+      if (node instanceof RedisDatabaseNode) {
+        openData(services, node);
         return;
       }
-      KafkaWorkspacePanel.show(services, d.id);
+      const dataSource = await target(services, node, {
+        accept: (d) => d.engine === 'redis',
+        none: 'No Redis data sources yet.',
+        newEngine: 'redis',
+      });
+      if (dataSource) await browseKeys(services, dataSource);
+    }),
+    command('datakit.openKafkaWorkspace', (d) => KafkaWorkspacePanel.show(services, d.id), {
+      accept: (d) => d.engine === 'kafka',
+      none: 'No Kafka data sources yet.',
+      newEngine: 'kafka',
     }),
     vscode.commands.registerCommand('datakit.objectClicked', (node: ObjectNode | RedisDatabaseNode | KafkaSectionNode | MongoCollectionNode) => {
       const now = Date.now();
@@ -93,21 +162,27 @@ export function registerDataSourceCommands(services: Services): vscode.Disposabl
     }),
     command('datakit.editDataSource', (d) => DataSourceEditor.show(services, d.id)),
     command('datakit.refreshDataSource', (d) => refreshDataSource(services, d)),
-    command('datakit.connectDataSource', async (d) => {
-      try {
-        await connectAndReveal(services, d.id);
-      } catch (error) {
-        if (!(error instanceof CancelledError)) {
-          void vscode.window.showErrorMessage(`Could not connect to “${d.name}”: ${errorMessage(error)}`);
+    command(
+      'datakit.connectDataSource',
+      async (d) => {
+        try {
+          await connectAndReveal(services, d.id);
+        } catch (error) {
+          showConnectionError(d, error);
         }
-      }
-    }),
-    command('datakit.disconnectDataSource', async (d) => {
-      await sessions.disconnect(d.id);
-      tree.collapse(d.id);
-    }),
+      },
+      { accept: (d) => !isActive(d), none: 'Every data source is connected.', newEngine: false },
+    ),
+    command(
+      'datakit.disconnectDataSource',
+      async (d) => {
+        await sessions.disconnect(d.id);
+        tree.collapse(d.id);
+      },
+      { accept: isActive, none: 'No data source is connected.', newEngine: false },
+    ),
     command('datakit.deleteDataSource', async (d) => {
-      if (!(await confirmDelete(d))) return;
+      if (!(await confirmDelete(services, d))) return;
       DataSourceEditor.close(d.id);
       SqlViewPanel.closeFor(d.id);
       RedisKeysPanel.closeFor(d.id);
@@ -117,8 +192,8 @@ export function registerDataSourceCommands(services: Services): vscode.Disposabl
       await sessions.disconnect(d.id);
       await services.consoles.deleteFor(d.id);
       await services.history.deleteFor(d.id);
+      // The data source disappears from the tree; that is the feedback.
       await store.delete(d.id);
-      void vscode.window.showInformationMessage(`Deleted “${d.name}”.`);
     }),
   ];
 }

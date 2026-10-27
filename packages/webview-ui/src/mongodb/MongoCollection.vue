@@ -53,7 +53,6 @@ const typeChip = computed(() => {
 });
 const showPipeline = ref(false);
 
-const shellOpen = ref(false);
 const DEFAULT_SHELL_HEIGHT = 200;
 const shellHeight = ref(DEFAULT_SHELL_HEIGHT);
 const maxShellHeight = () => Math.max(120, window.innerHeight - 220);
@@ -111,7 +110,7 @@ onUnmounted(col.stop);
     </main>
 
     <SplitHandle
-      v-if="shellOpen"
+      v-if="s.shell.open"
       v-model="shellHeight"
       after
       label="Resize the shell"
@@ -120,10 +119,11 @@ onUnmounted(col.stop);
       :default-size="DEFAULT_SHELL_HEIGHT"
     />
     <MongoShell
-      v-model:open="shellOpen"
-      :style="shellOpen ? { height: `${shellHeight}px` } : undefined"
+      v-model:open="s.shell.open"
+      :style="s.shell.open ? { height: `${shellHeight}px` } : undefined"
       :entries="s.shell.entries"
       :busy="s.shell.busy"
+      :running="s.shell.running"
       :database="s.shell.database"
       :collection="s.init.collection"
       @run="col.runShell"

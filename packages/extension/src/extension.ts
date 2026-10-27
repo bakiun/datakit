@@ -19,6 +19,7 @@ import { QueryConsolePanel } from './sql/queryConsolePanel';
 import { RedisKeysPanel } from './redis/redisKeysPanel';
 import { SqlViewPanel } from './sql/sqlViewPanel';
 import { TableDataPanel, type TableRef } from './sql/tableDataPanel';
+import { registerPanelSerializers, restoreOrDispose, type PanelRestorer } from './webview/panelSerializer';
 
 /** Returned only to the end-to-end tests. */
 export type TestApi = Pick<Services, 'store' | 'sessions' | 'consoles' | 'history' | 'tree' | 'view'> & {
@@ -39,6 +40,8 @@ export type TestApi = Pick<Services, 'store' | 'sessions' | 'consoles' | 'histor
   onDidLoadMongo: typeof MongoCollectionPanel.onDidLoad;
   onDidPostMongo: typeof MongoCollectionPanel.onDidPost;
   sendToMongo: typeof MongoCollectionPanel.receive;
+  /** Does what the serializer of `viewType` does when VS Code restores a tab; tells whether the panel came back. */
+  restorePanel(viewType: string, panel: vscode.WebviewPanel, state: unknown): Promise<boolean>;
 };
 
 export function activate(context: vscode.ExtensionContext): TestApi | undefined {
@@ -52,6 +55,15 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
   const historyView = vscode.window.createTreeView(QUERY_HISTORY_VIEW, { treeDataProvider: historyTree });
   const kafkaFavourites = new KafkaFavourites(context.globalState);
   const services: Services = { context, store, sessions, consoles, history, kafkaFavourites, tree, view };
+  /** Tabs that come back when VS Code opens the window again; package.json activates on each of these view types. */
+  const restorers: Record<string, PanelRestorer> = {
+    [DataSourceEditor.viewType]: (panel, state) => DataSourceEditor.restore(services, panel, state),
+    [TableDataPanel.viewType]: (panel, state) => TableDataPanel.restore(services, panel, state),
+    [QueryConsolePanel.viewType]: (panel, state) => QueryConsolePanel.restore(services, panel, state),
+    [MongoCollectionPanel.viewType]: (panel, state) => MongoCollectionPanel.restore(services, panel, state),
+    [RedisKeysPanel.viewType]: (panel, state) => RedisKeysPanel.restore(services, panel, state),
+    [KafkaWorkspacePanel.viewType]: (panel, state) => KafkaWorkspacePanel.restore(services, panel, state),
+  };
 
   context.subscriptions.push(
     store,
@@ -68,6 +80,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     ...registerHistoryCommands(services),
     ...registerPostgresCommands(services),
     ...registerMongoCommands(services),
+    ...registerPanelSerializers(restorers),
     { dispose: () => SqlViewPanel.disposeAll() },
     { dispose: () => RedisKeysPanel.disposeAll() },
     { dispose: () => KafkaWorkspacePanel.disposeAll() },
@@ -99,6 +112,10 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
         onDidLoadMongo: MongoCollectionPanel.onDidLoad,
         onDidPostMongo: MongoCollectionPanel.onDidPost,
         sendToMongo: (ref, message) => MongoCollectionPanel.receive(ref, message),
+        restorePanel: async (viewType, panel, state) => {
+          const restore = restorers[viewType];
+          return restore ? restoreOrDispose(restore, panel, state) : false;
+        },
       }
     : undefined;
 }

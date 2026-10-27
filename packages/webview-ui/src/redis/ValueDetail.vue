@@ -1,15 +1,22 @@
 <script setup lang="ts">
 import type { RedisText } from '@datakit/core';
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import CodeView from '../components/CodeView.vue';
 import IconButton from '../components/IconButton.vue';
 import { describeValue, textOf } from './format';
 
-/** The value of the picked item in full; JSON is shown parsed and indented unless “Text” is picked. */
+/**
+ * The value of the picked item in full; JSON is shown parsed and indented unless “Text” is picked. `raw`, the “Text”
+ * choice, is shared with the string editor, so it stays from key to key.
+ */
 const props = defineProps<{ label: string; value: RedisText }>();
 defineEmits<{ copy: [text: string] }>();
+const raw = defineModel<boolean>('raw', { required: true });
 
-const view = ref<'auto' | 'text'>('auto');
+const view = computed({
+  get: (): 'auto' | 'text' => (raw.value ? 'text' : 'auto'),
+  set: (next) => (raw.value = next === 'text'),
+});
 const info = computed(() => describeValue(props.value));
 const parsed = computed(() => view.value === 'auto' && info.value.json !== undefined);
 const text = computed(() => (parsed.value ? JSON.stringify(info.value.json, null, 2) : textOf(props.value)));

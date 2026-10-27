@@ -11,7 +11,9 @@ import type {
   KafkaTopicSummary,
   KafkaWorkspaceHostMessage,
   KafkaWorkspaceInit,
+  KafkaWorkspacePrefs,
   KafkaWorkspaceWebviewMessage,
+  KafkaValueFormat,
   KafkaWrite,
   KafkaWriteKind,
   KsqlDbInfo,
@@ -20,6 +22,7 @@ import type {
 } from '@datakit/core';
 import { inject, onUnmounted, provide, reactive, type InjectionKey } from 'vue';
 import { onHostMessage, postToHost } from '../host';
+import type { MessageFilter } from './messageQuery';
 
 /**
  * State shared by the Kafka workspace screens: what the host sent for the cluster, which section is open, and the
@@ -30,6 +33,26 @@ import { onHostMessage, postToHost } from '../host';
 export interface WriteResult {
   ok: boolean;
   message: string;
+  /** The user declined VS Code's Production confirmation; nothing needs to be shown. */
+  cancelled?: boolean;
+}
+
+export interface WriteOptions {
+  /** The caller shows a failure itself, e.g. a dialog that shows it inline. */
+  quiet?: boolean;
+  /** False when the change shows on the page by itself, e.g. an edited setting, so no toast says it again. */
+  announce?: boolean;
+}
+
+/** What the produce form held for a topic, so closing it or opening another topic loses nothing. */
+export interface ProduceDraft {
+  partition: string;
+  valueFormat: KafkaValueFormat;
+  key: string;
+  keyNull: boolean;
+  value: string;
+  headers: string;
+  count: string;
 }
 
 /** Loads of one item; `loadFailed` names these as well as the KafkaLoads. */
@@ -63,6 +86,8 @@ export interface WorkspaceState {
   /** The group Consumers picks when it opens, e.g. from a topic's Consumers tab. */
   group: string | null;
   favourites: string[];
+  /** Choices remembered per data source; `setPrefs` changes them. */
+  prefs: KafkaWorkspacePrefs;
   overview: OverviewData | null;
   brokers: KafkaBroker[] | null;
   topics: KafkaTopicSummary[] | null;
@@ -116,6 +141,7 @@ export function createWorkspace() {
     topic: null,
     group: null,
     favourites: [],
+    prefs: {},
     overview: null,
     brokers: null,
     topics: null,
@@ -133,10 +159,15 @@ export function createWorkspace() {
     toast: null,
   });
   /** Writes sent and not answered yet, oldest first per kind; the host answers each with `done` or `failed`. */
-  const pending = new Map<KafkaWriteKind, { write: KafkaWrite; quiet: boolean; resolve: (result: WriteResult) => void }[]>();
+  const pending = new Map<KafkaWriteKind, { write: KafkaWrite; options: WriteOptions; resolve: (result: WriteResult) => void }[]>();
   const doneListeners = new Set<DoneListener>();
   /** Loads the page has asked for at least once, so a write only reloads what is shown somewhere. */
   const used = new Set<KafkaLoad>();
+  /**
+   * What a topic's screens held when they were left, by topic: the message filters and the produce form. Kept for
+   * as long as the workspace is open.
+   */
+  const memory = { filters: new Map<string, MessageFilter[]>(), produce: new Map<string, ProduceDraft>() };
   let toastId = 0;
 
   /** Messages are copied so no Vue proxy goes to postMessage. */
@@ -153,14 +184,11 @@ export function createWorkspace() {
     state.toast = { id: ++toastId, text, error };
   }
 
-  /**
-   * Sends a write; the promise resolves with the host's `done` or `failed`. A `quiet` write leaves showing a
-   * failure to the caller, e.g. a dialog that shows it inline.
-   */
-  function write(change: KafkaWrite, options: { quiet?: boolean } = {}): Promise<WriteResult> {
+  /** Sends a write; the promise resolves with the host's `done` or `failed`. */
+  function write(change: KafkaWrite, options: WriteOptions = {}): Promise<WriteResult> {
     return new Promise((resolve) => {
       const queue = pending.get(change.kind) ?? [];
-      queue.push({ write: change, quiet: !!options.quiet, resolve });
+      queue.push({ write: change, options, resolve });
       pending.set(change.kind, queue);
       post({ type: 'write', write: change });
     });
@@ -172,16 +200,20 @@ export function createWorkspace() {
     onUnmounted(() => doneListeners.delete(listener));
   }
 
-  function settle(kind: KafkaWriteKind, ok: boolean, message: string): void {
+  function settle(kind: KafkaWriteKind, ok: boolean, message: string, cancelled = false): void {
     const entry = pending.get(kind)?.shift();
+    if (cancelled) {
+      entry?.resolve({ ok: false, message: '', cancelled: true });
+      return;
+    }
     if (ok) {
-      showToast(message);
+      if (entry?.options.announce !== false) showToast(message);
       for (const what of RELOAD_AFTER[kind] ?? []) if (used.has(what)) load(what);
       const change = entry?.write ?? null;
       if (change && 'topic' in change && change.topic === state.topic && TOPIC_WRITES.has(kind)) reopenTopic();
       if (change?.kind === 'deleteTopic') forgetTopic(change.topic);
       for (const listener of doneListeners) listener(change, message);
-    } else if (!entry?.quiet) {
+    } else if (!entry?.options.quiet) {
       showToast(message, true);
     }
     entry?.resolve({ ok, message });
@@ -235,18 +267,31 @@ export function createWorkspace() {
     post({ type: 'copy', text, what });
   }
 
+  function setPrefs(patch: KafkaWorkspacePrefs): void {
+    state.prefs = { ...state.prefs, ...patch };
+    post({ type: 'prefs', prefs: patch });
+  }
+
   function handle(message: KafkaWorkspaceHostMessage): void {
     switch (message.type) {
-      case 'init':
+      case 'init': {
+        // A second init follows an edit of the data source: the page stays where it is and reads the cluster again.
+        const again = state.init !== null;
         state.init = message.init;
         state.initError = null;
         state.favourites = message.init.favourites;
-        state.section = message.init.section;
+        state.prefs = message.init.prefs;
         load('overview');
         load('acls');
+        if (again) {
+          if (state.topic) reopenTopic();
+          break;
+        }
+        state.section = message.init.section;
         if (message.init.topic) openTopic(message.init.topic);
         else state.topic = null;
         break;
+      }
       case 'initFailed':
         state.initError = message.message;
         break;
@@ -279,7 +324,7 @@ export function createWorkspace() {
         break;
       case 'topicGone':
         state.loading.topic = false;
-        if (state.topic === message.topic) showToast(`Topic ${message.topic} no longer exists.`, true);
+        if (state.topic === message.topic) showToast(`Topic ${message.topic} no longer exists; showing the topic list.`);
         forgetTopic(message.topic);
         break;
       case 'groups':
@@ -313,20 +358,20 @@ export function createWorkspace() {
         settle(message.kind, true, message.message);
         break;
       case 'failed':
-        settle(message.kind, false, message.message);
+        settle(message.kind, false, message.message, !!message.cancelled);
         break;
       case 'favourites':
         state.favourites = message.names;
         break;
       case 'notice':
-        showToast(message.message);
+        showToast(message.message, !!message.error);
         break;
     }
   }
 
   const stop = onHostMessage<KafkaWorkspaceHostMessage>(handle);
 
-  return { state, post, load, write, onDone, go, openTopic, reopenTopic, openGroup, setFavourite, copy, showToast, stop };
+  return { state, memory, post, load, write, onDone, go, openTopic, reopenTopic, openGroup, setFavourite, copy, setPrefs, showToast, stop };
 }
 
 export type Workspace = ReturnType<typeof createWorkspace>;

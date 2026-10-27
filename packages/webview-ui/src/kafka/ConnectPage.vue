@@ -12,7 +12,7 @@ import { useWorkspace } from './workspace';
 const ws = useWorkspace();
 const s = ws.state;
 
-type Dialog = { kind: 'new' } | { kind: 'edit'; name: string } | { kind: 'stop' | 'resetOffsets'; name: string };
+type Dialog = { kind: 'new' } | { kind: 'edit'; name: string } | { kind: 'resetOffsets'; name: string; stopped: boolean };
 const dialog = ref<Dialog | null>(null);
 /** Connectors with a write on the way. */
 const busy = ref(new Set<string>());
@@ -32,7 +32,8 @@ const failures = (c: Connector) => [
 
 async function act(name: string, action: ConnectorAction): Promise<void> {
   busy.value = new Set(busy.value).add(name);
-  await ws.write({ kind: 'connector', name, action });
+  // Pause and resume show in the card's state; a restart does not, so it is announced.
+  await ws.write({ kind: 'connector', name, action }, { announce: action === 'restart' });
   const next = new Set(busy.value);
   next.delete(name);
   busy.value = next;
@@ -47,8 +48,12 @@ async function restartTask(name: string, task: number): Promise<void> {
 }
 
 function resetOffsets(c: Connector): void {
-  dialog.value = { kind: c.state === 'STOPPED' ? 'resetOffsets' : 'stop', name: c.name };
+  dialog.value = { kind: 'resetOffsets', name: c.name, stopped: c.state === 'STOPPED' };
 }
+
+/** Connect resets stopped connectors only; the host stops a running one first. */
+const resetText = (name: string, stopped: boolean) =>
+  `${stopped ? `Removes the offsets ${name} has committed.` : `Stops ${name}, then removes the offsets it has committed.`} When it is resumed it starts over: a source reads from the beginning, a sink from its consumer group's reset policy.`;
 
 const confirmAction = (name: string, action: ConnectorAction) => () => ws.write({ kind: 'connector', name, action }, { quiet: true });
 
@@ -71,7 +76,10 @@ onMounted(() => ws.load('connectors'));
     <div class="page-body">
       <p v-if="s.errors.connectors" class="error-line" role="alert"><Icon name="error" :size="14" /> {{ s.errors.connectors }}</p>
       <p v-else-if="!s.connect" class="empty-state">{{ s.loading.connectors ? 'Reading the connectors…' : '' }}</p>
-      <p v-else-if="!connectors.length" class="empty-state">No connectors yet.{{ readOnly ? '' : ' Create one with New connector.' }}</p>
+      <p v-else-if="!connectors.length" class="empty-state">
+        No connectors yet.
+        <button v-if="!readOnly" type="button" class="lnk" @click="dialog = { kind: 'new' }">Create a connector</button>
+      </p>
       <article v-for="c in connectors" :key="c.name" class="card" :class="{ failed: failures(c).length, busy: busy.has(c.name) }">
         <div class="card-head">
           <span class="dot" :class="`tone-${connectorTone(c.state)}`" />
@@ -104,19 +112,11 @@ onMounted(() => ws.load('connectors'));
     <ConnectorDialog v-if="dialog?.kind === 'new'" :name="null" :existing="connectors.map((c) => c.name)" @close="dialog = null" />
     <ConnectorDialog v-else-if="dialog?.kind === 'edit'" :name="dialog.name" :existing="[]" @close="dialog = null" />
     <ConfirmDialog
-      v-else-if="dialog?.kind === 'stop'"
-      :title="`Stop ${dialog.name}`"
-      :text="`Offsets can only be reset on a stopped connector. Stop ${dialog.name} first? Its tasks shut down until it is resumed. Then choose Reset offsets again.`"
-      primary="Stop connector"
-      :action="confirmAction(dialog.name, 'stop')"
-      @close="dialog = null"
-    />
-    <ConfirmDialog
       v-else-if="dialog?.kind === 'resetOffsets'"
       :title="`Reset the offsets of ${dialog.name}`"
-      :text="`Removes the offsets ${dialog.name} has committed. When it is resumed it starts over: a source reads from the beginning, a sink from its consumer group's reset policy.`"
+      :text="resetText(dialog.name, dialog.stopped)"
       :target="dialog.name"
-      primary="Reset offsets"
+      :primary="dialog.stopped ? 'Reset offsets' : 'Stop and reset offsets'"
       :action="confirmAction(dialog.name, 'resetOffsets')"
       @close="dialog = null"
     />

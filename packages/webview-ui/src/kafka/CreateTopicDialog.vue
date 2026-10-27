@@ -28,7 +28,8 @@ function create() {
   return ws
     .write(
       { kind: 'createTopic', spec: { name: topic, partitions: partitionCount.value, replicationFactor: replication.value, configs }, cloneOf: props.source?.name ?? null },
-      { quiet: true },
+      // A new topic opens, which says enough; a clone's toast says the messages stayed behind.
+      { quiet: true, announce: !!props.source },
     )
     .then((result) => {
       if (result.ok) ws.openTopic(topic);

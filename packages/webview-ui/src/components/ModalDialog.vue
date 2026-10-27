@@ -5,7 +5,7 @@ export interface ActionResult {
   message: string;
 }
 
-/** Open dialogs, newest last; only the newest answers Escape. */
+/** Open dialogs, newest last; only the newest answers its shortcuts. */
 const open: symbol[] = [];
 </script>
 
@@ -13,10 +13,13 @@ const open: symbol[] = [];
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import Icon from './Icon.vue';
 import IconButton from './IconButton.vue';
+import { isSubmitShortcut, SUBMIT_KEY } from './shortcuts';
 
 /**
  * A modal dialog. With an `action`, it has Cancel and a primary button that runs the action, waits for its answer and
  * closes when it worked; a failure is shown above the buttons and the dialog stays open. Without one it only has Close.
+ * Enter in a field, or ⌘Enter (Ctrl+Enter off macOS) anywhere, code editors included, runs the primary; Escape
+ * cancels, once a field that uses Escape itself, such as an editor's completion list, has had it.
  * Content styles (fields, rows) come from the screen that opens it.
  */
 const props = withDefaults(
@@ -46,32 +49,41 @@ function close(): void {
 }
 
 const id = Symbol('dialog');
+const isTop = () => open[open.length - 1] === id;
 
-function onKey(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && open[open.length - 1] === id) {
-    event.stopPropagation();
-    close();
-  }
+/** Before the focused field: the shortcut submits from editors too, and the screen behind never gets it. */
+function onSubmitKey(event: KeyboardEvent): void {
+  if (!isTop() || !isSubmitShortcut(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void submit();
+}
+
+/** After the focused field, which may use Escape itself (a completion list, a selection) and then prevents it. */
+function onEscape(event: KeyboardEvent): void {
+  if (!isTop() || event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+  event.stopPropagation();
+  close();
 }
 
 let before: Element | null = null;
 onMounted(async () => {
   before = document.activeElement;
   open.push(id);
-  document.addEventListener('keydown', onKey, true);
+  document.addEventListener('keydown', onSubmitKey, true);
+  document.addEventListener('keydown', onEscape);
   await nextTick();
-  // The first field; without one, the primary button, or Cancel when the primary is destructive.
-  const first = body.value?.querySelector<HTMLElement>('input:not([disabled]), select, textarea, [contenteditable="true"]');
-  const button = body.value?.querySelector<HTMLElement>(props.danger ? '.foot .cancel' : '.foot [type="submit"]:not([disabled]), .foot .cancel');
-  (first ?? button)?.focus();
+  // The first field; a dialog without fields, such as a confirmation, focuses its primary button so Enter confirms.
+  const first = body.value?.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [contenteditable="true"]');
+  const submitButton = body.value?.querySelector<HTMLElement>('.foot [type="submit"]:not([disabled])');
+  (first ?? submitButton ?? body.value?.querySelector<HTMLElement>('.foot .cancel'))?.focus();
 });
 onBeforeUnmount(() => {
-  document.removeEventListener('keydown', onKey, true);
+  document.removeEventListener('keydown', onSubmitKey, true);
+  document.removeEventListener('keydown', onEscape);
   open.splice(open.indexOf(id), 1);
   if (before instanceof HTMLElement) before.focus();
 });
-
-defineExpose({ submit });
 </script>
 
 <template>
@@ -87,7 +99,7 @@ defineExpose({ submit });
         <slot name="foot-start" />
         <template v-if="action">
           <button type="button" class="btn cancel" @click="close">Cancel</button>
-          <button type="submit" class="btn" :class="danger ? 'danger' : 'btn-primary'" :disabled="disabled || busy">{{ busy ? 'Working…' : primary }}</button>
+          <button type="submit" class="btn" :class="danger ? 'danger' : 'btn-primary'" :disabled="disabled || busy" :title="`${primary} (${SUBMIT_KEY})`">{{ busy ? 'Working…' : primary }}</button>
         </template>
         <button v-else type="button" class="btn cancel" @click="close">Close</button>
       </div>
