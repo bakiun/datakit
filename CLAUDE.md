@@ -1,8 +1,8 @@
 # Datakit VS Code Extension — Project Standards
 
-Datakit is an extension that connects from inside VS Code, as a client, to servers such as Kafka, MongoDB, MariaDB/MySQL, PostgreSQL and Redis. The goal is a complete database client experience: establishing connections, running queries and commands, and listing and editing data.
-
 The rules in this file are binding. If a rule needs to be departed from, approval is obtained first.
+
+Follow the **Frictionless UX** principle. Minimize user effort, cognitive load, unnecessary inputs, warnings, and error messages. Design interfaces to be simple, intuitive, and effortless to use.
 
 When several different tasks are given, use sub-agents.
 

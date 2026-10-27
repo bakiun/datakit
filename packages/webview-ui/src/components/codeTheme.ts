@@ -23,6 +23,9 @@ export const codeTheme = EditorView.theme({
   '.cm-gutters': { backgroundColor: 'var(--vscode-editor-background)', color: 'var(--vscode-editorLineNumber-foreground)', border: 'none' },
   '.cm-lineNumbers .cm-gutterElement': { minWidth: '28px', padding: '0 16px 0 0' },
   '.cm-activeLine': { backgroundColor: 'var(--vscode-editor-lineHighlightBackground)' },
+  // drawSelection() paints the selection in a layer behind the lines, so an opaque line highlight (VS Code's
+  // default dark theme has one) hides the selection on the cursor's line. Like VS Code, drop it while text is selected.
+  '&:has(.cm-selectionBackground) .cm-activeLine': { backgroundColor: 'transparent' },
   '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--vscode-editorLineNumber-activeForeground)' },
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground': {
     backgroundColor: 'var(--vscode-editor-selectionBackground)',

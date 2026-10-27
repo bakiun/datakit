@@ -14,10 +14,12 @@ import {
 import { computed, markRaw, reactive, ref, type Ref } from 'vue';
 import { postToHost } from '../host';
 import type ScriptEditor from './ScriptEditor.vue';
-import { applyPaging, readPaging, unpaged, withoutLimit } from './scriptClauses';
+import { applyPaging, readPaging, unpaged, withoutLimit, type Paging } from './scriptClauses';
 import { existingRowId, useTableChanges, type RowId } from './tableChanges';
 
 export type ScriptEditorApi = InstanceType<typeof ScriptEditor>;
+
+type PagingChange = { sort?: SortKey[]; limit?: number; offset?: number };
 
 /**
  * What the data view and the query console share: running the script, paging and sorting the shown query,
@@ -106,22 +108,54 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     loading.value = true;
     runError.value = null;
     failedAt.value = null;
+    editor.value.mark();
     post({ type: 'run', statements: parts.map(statementOf), autoCommit: autoCommit.value, ...(options.record === false ? { record: false } : {}) });
   }
 
-  /** Rewrites the shown query's ORDER BY or LIMIT in the script and runs that query again. */
-  function repage(change: { sort?: SortKey[]; limit?: number; offset?: number }): void {
+  /**
+   * The shown query as it is in the editor now, which the user may have edited since it ran. When an edit leaves
+   * several queries where it was, e.g. the whole script was replaced, the last of them, as Run would show it.
+   * Null when no query is left there.
+   */
+  function shownQuery(): { text: string; from: number; to: number; edited: boolean } | null {
     const current = page.value?.statement;
-    if (!current || !editor.value || locked.value) return;
-    if (editor.value.slice(current.from, current.to) !== current.text) {
-      showNotice('The script changed since it ran; press Run first.');
+    if (!current || !editor.value) return null;
+    // Without the text typed right at either end, e.g. a statement added in front of the query.
+    const inner = { from: editor.value.mapped(current.from, 1), to: editor.value.mapped(current.to, -1) };
+    if (inner.from < inner.to && editor.value.slice(inner.from, inner.to) === current.text) {
+      return { text: current.text, ...inner, edited: false };
+    }
+    const outer = { from: editor.value.mapped(current.from, -1), to: editor.value.mapped(current.to, 1) };
+    const queries = splitSqlScript(script.value, dialect.value).filter((p) => isPageableQuery(p.text, dialect.value));
+    const overlapping = (range: { from: number; to: number }) => queries.filter((p) => p.from < range.to && p.to > range.from);
+    const inside = inner.from < inner.to ? overlapping(inner) : [];
+    const part = (inside.length ? inside : overlapping(outer)).at(-1);
+    return part ? { text: part.text, from: part.from, to: part.to, edited: part.text !== current.text } : null;
+  }
+
+  /**
+   * Rewrites the ORDER BY or LIMIT of the shown query in the script and runs it again. A query edited since it ran
+   * runs as Run would run it, so it goes into the history too.
+   */
+  function repage(change: PagingChange | ((paging: Paging) => PagingChange)): void {
+    if (!page.value || !editor.value || locked.value) return;
+    const target = shownQuery();
+    if (!target) {
+      showNotice('The shown query is no longer in the script; press Run.');
       return;
     }
-    const text = applyPaging(current.text, dialect.value, change);
-    editor.value.replace(current.from, current.to, text);
+    const text = applyPaging(target.text, dialect.value, typeof change === 'function' ? change(readPaging(target.text, dialect.value)) : change);
+    editor.value.replace(target.from, target.to, text);
+    editor.value.mark();
+    const statement = statementOf({ text, from: target.from, to: target.from + text.length });
     loading.value = true;
     runError.value = null;
-    post({ type: 'query', statement: statementOf({ text, from: current.from, to: current.from + text.length }) });
+    if (target.edited) {
+      failedAt.value = null;
+      post({ type: 'run', statements: [statement], autoCommit: autoCommit.value });
+    } else {
+      post({ type: 'query', statement });
+    }
   }
 
   function reload(): void {
@@ -131,22 +165,27 @@ export function useSqlView(init: Ref<TableDataInit | null>, editor: Ref<ScriptEd
     post({ type: 'query', statement: clone(page.value.statement) });
   }
 
-  /** Click sorts by one column (asc → desc → off); Shift+click adds, flips or removes a column. */
+  /**
+   * Click sorts by one column (asc → desc → off); Shift+click adds, flips or removes a column.
+   * It starts from the ORDER BY and LIMIT in the editor, which the user may have changed since the query ran.
+   */
   function sortBy(column: string, additive: boolean): void {
-    const current = sort.value;
-    const index = current.findIndex((k) => k.column === column);
-    let next: SortKey[];
-    if (additive) {
-      next = [...current];
-      if (index < 0) next.push({ column, direction: 'asc' });
-      else if (next[index]!.direction === 'asc') next[index] = { column, direction: 'desc' };
-      else next.splice(index, 1);
-    } else if (current.length === 1 && index === 0) {
-      next = current[0]!.direction === 'asc' ? [{ column, direction: 'desc' }] : [];
-    } else {
-      next = [{ column, direction: 'asc' }];
-    }
-    repage({ sort: next, limit: limit.value, offset: 0 });
+    repage((paging) => {
+      const current = paging.sort ?? [];
+      const index = current.findIndex((k) => k.column === column);
+      let next: SortKey[];
+      if (additive) {
+        next = [...current];
+        if (index < 0) next.push({ column, direction: 'asc' });
+        else if (next[index]!.direction === 'asc') next[index] = { column, direction: 'desc' };
+        else next.splice(index, 1);
+      } else if (current.length === 1 && index === 0) {
+        next = current[0]!.direction === 'asc' ? [{ column, direction: 'desc' }] : [];
+      } else {
+        next = [{ column, direction: 'asc' }];
+      }
+      return { sort: next, limit: paging.limit ?? init.value?.pageSize ?? 100, offset: 0 };
+    });
   }
 
   function setLimit(value: number): void {

@@ -3,7 +3,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } 
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
 import { bracketMatching, syntaxHighlighting } from '@codemirror/language';
-import { Compartment, EditorSelection, EditorState } from '@codemirror/state';
+import { ChangeSet, Compartment, EditorSelection, EditorState } from '@codemirror/state';
 import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers, placeholder } from '@codemirror/view';
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { SqlDialect } from '@datakit/core';
@@ -19,6 +19,8 @@ const host = ref<HTMLElement>();
 let view: EditorView | undefined;
 /** The SQL language settings; replaced when the dialect or the known tables change, e.g. in another database. */
 const language = new Compartment();
+/** The edits made since `mark()`, to find where text sent to the host has moved since. */
+let sinceMark: ChangeSet | undefined;
 const sqlLanguage = () =>
   sql({ dialect: GRAMMARS[props.dialect], schema: props.schema, defaultTable: props.defaultTable, upperCaseKeywords: true });
 
@@ -51,7 +53,9 @@ onMounted(() => {
           indentWithTab,
         ]),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) model.value = update.state.doc.toString();
+          if (!update.docChanged) return;
+          model.value = update.state.doc.toString();
+          sinceMark = sinceMark?.compose(update.changes);
         }),
       ],
     }),
@@ -81,6 +85,14 @@ defineExpose({
   },
   slice(from: number, to: number): string {
     return view?.state.sliceDoc(from, to) ?? '';
+  },
+  /** Starts following the edits, so `mapped` can tell where a position of the script as it is now moves to. */
+  mark(): void {
+    if (view) sinceMark = ChangeSet.empty(view.state.doc.length);
+  },
+  /** Where a position from the time of `mark()` is now; `assoc` -1 stays before text typed right at it, 1 goes after. */
+  mapped(position: number, assoc: -1 | 1): number {
+    return sinceMark ? sinceMark.mapPos(position, assoc) : position;
   },
   /** Where the cursor is. */
   cursor(): number {
