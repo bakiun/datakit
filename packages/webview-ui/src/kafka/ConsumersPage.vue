@@ -1,12 +1,19 @@
+<script lang="ts">
+/** Only the first time the page is shown after it loaded does it go back to the saved group. */
+let firstMount = true;
+</script>
+
 <script setup lang="ts">
 import type { KafkaGroupDetail, KafkaGroupOffset, KafkaOffsetTarget, KafkaWorkspaceHostMessage } from '@datakit/core';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import ConfirmDialog from './ConfirmDialog.vue';
 import { formatTime, groupState, lagText, num, offsetText, parseLocalTime, parseOffset, plural, totalLag } from './format';
 import { describeReset } from './offsetReset';
+import { consumersToSave, readSavedConsumers } from './savedState';
 import { useWorkspace, type WriteResult } from './workspace';
 
 /** The consumer groups; the picked group's committed offsets can be moved, all at once or the selected partitions. */
@@ -23,6 +30,14 @@ const targetKind = ref<TargetKind>('earliest');
 const targetValue = ref('');
 const resetting = ref(false);
 const deleting = ref(false);
+/** The group and selected rows come back after a reload of the page; reading the group writes nothing. */
+const saved = usePersistedState('kafka.consumers', {
+  version: 1,
+  value: () => consumersToSave(picked.value, selected.value),
+  validate: readSavedConsumers,
+});
+/** Rows to select again once the restored group's offsets have arrived. */
+let restoreSelection: string[] | null = null;
 
 const readOnly = computed(() => s.init!.readOnly);
 const groups = computed(() =>
@@ -44,6 +59,7 @@ function open(id: string): void {
   if (picked.value !== id) {
     detail.value = null;
     selected.value = new Set();
+    restoreSelection = null;
   }
   picked.value = id;
   delete s.errors.group;
@@ -121,9 +137,16 @@ ws.onDone((write) => {
 });
 
 const stop = onHostMessage<KafkaWorkspaceHostMessage>((message) => {
-  if (message.type === 'group' && message.detail.id === picked.value) detail.value = message.detail;
-  else if (message.type === 'groupGone' && message.groupId === picked.value) {
+  if (message.type === 'group' && message.detail.id === picked.value) {
+    detail.value = message.detail;
+    if (restoreSelection) {
+      const rows = new Set(offsets.value.map(rowKey));
+      selected.value = new Set(restoreSelection.filter((key) => rows.has(key)));
+      restoreSelection = null;
+    }
+  } else if (message.type === 'groupGone' && message.groupId === picked.value) {
     // The list is read again and the first group is picked; the gone one drops out of it.
+    restoreSelection = null;
     picked.value = null;
     detail.value = null;
     ws.load('groups');
@@ -134,8 +157,14 @@ onMounted(() => {
   ws.load('groups');
   const wanted = s.group;
   s.group = null;
+  const restored = saved.restore();
+  const back = firstMount && !wanted ? restored : undefined;
+  firstMount = false;
   if (wanted) open(wanted);
-  else if (groups.value[0]) open(groups.value[0].id);
+  else if (back?.picked) {
+    open(back.picked);
+    restoreSelection = back.selected;
+  } else if (groups.value[0]) open(groups.value[0].id);
 });
 onUnmounted(stop);
 </script>

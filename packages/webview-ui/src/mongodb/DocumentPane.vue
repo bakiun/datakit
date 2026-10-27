@@ -1,3 +1,11 @@
+<script lang="ts">
+/** Unsaved edits of the pane: the text, and the fingerprint of the document text it was edited from. */
+export interface PaneDraft {
+  base: string;
+  text: string;
+}
+</script>
+
 <script setup lang="ts">
 import type { MongoDocument } from '@datakit/core';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
@@ -5,6 +13,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import { SUBMIT_KEY } from '../components/shortcuts';
+import { fingerprint } from '../composables/usePersistedState';
 import { useCollection } from './collection';
 import { formatBytes } from './format';
 import ShellCode from './ShellCode.vue';
@@ -13,18 +22,24 @@ import ShellCode from './ShellCode.vue';
  * The picked document in an editor. Save replaces the whole document (its `_id` stays), Revert goes back to the read
  * text. Documents cut short (over 1 MiB) and read-only collections are shown read-only.
  * `focusRequest` focuses the editor whenever it changes, e.g. after Edit on a card. `dirty` tells the page whether
- * there are unsaved edits, so it can ask before they would be dropped.
+ * there are unsaved edits, so it can ask before they would be dropped; `draft` hands it the edits to keep across a
+ * reload (null when there are none), and `initialDraft` brings them back. A draft made on a version of the document
+ * that is no longer the one read shows the same note as a change on the server while editing.
  */
-const props = defineProps<{ document: MongoDocument; readOnlyReason: string | null; focusRequest: number }>();
-const emit = defineEmits<{ close: []; deleted: []; dirty: [dirty: boolean] }>();
+const props = defineProps<{ document: MongoDocument; readOnlyReason: string | null; focusRequest: number; initialDraft?: PaneDraft | null }>();
+const emit = defineEmits<{ close: []; deleted: []; dirty: [dirty: boolean]; draft: [draft: PaneDraft | null] }>();
 const col = useCollection();
 
+/** Edits kept from before a reload; a document that cannot be saved here starts as read. */
+const restored = props.initialDraft && props.readOnlyReason === null && !props.document.truncated && props.document.id ? props.initialDraft : null;
 const original = ref(props.document.text);
-const draft = ref(props.document.text);
+const draft = ref(restored?.text ?? props.document.text);
+/** The fingerprint of the text the draft was edited from; it stays while the server's version differs. */
+const editedFrom = ref(restored?.base ?? fingerprint(props.document.text));
 const saving = ref(false);
 const error = ref<string | null>(null);
 /** The document changed on the server while there were edits here. */
-const stale = ref(false);
+const stale = ref(restored !== null && restored.base !== fingerprint(props.document.text) && restored.text !== props.document.text);
 const deleting = ref(false);
 /** A quiet “Saved” beside the buttons, until the next edit or a few seconds later. */
 const saved = ref(false);
@@ -37,6 +52,11 @@ watch(dirty, (value) => {
   emit('dirty', value);
   if (value) saved.value = false;
 });
+// A restored draft is unsaved from the start.
+if (dirty.value) emit('dirty', true);
+const emitDraft = () => emit('draft', dirty.value && !locked.value ? { base: editedFrom.value, text: draft.value } : null);
+watch([draft, editedFrom, locked], emitDraft);
+if (dirty.value) emitDraft();
 onBeforeUnmount(() => {
   clearTimeout(savedTimer);
   emit('dirty', false);
@@ -51,6 +71,7 @@ watch(
   () => props.document.id,
   () => {
     original.value = draft.value = props.document.text;
+    editedFrom.value = fingerprint(props.document.text);
     error.value = null;
     stale.value = false;
     saved.value = false;
@@ -60,8 +81,10 @@ watch(
   () => props.document.text,
   (text) => {
     if (text === original.value) return;
-    if (!dirty.value) draft.value = text;
-    else stale.value = true;
+    if (!dirty.value) {
+      draft.value = text;
+      editedFrom.value = fingerprint(text);
+    } else stale.value = true;
     original.value = text;
   },
 );
@@ -79,6 +102,7 @@ async function save(): Promise<void> {
   saving.value = false;
   if (result.ok) {
     original.value = sent;
+    editedFrom.value = fingerprint(sent);
     stale.value = false;
     saved.value = true;
     clearTimeout(savedTimer);
@@ -88,6 +112,7 @@ async function save(): Promise<void> {
 
 function revert(): void {
   draft.value = original.value;
+  editedFrom.value = fingerprint(original.value);
   error.value = null;
   stale.value = false;
 }

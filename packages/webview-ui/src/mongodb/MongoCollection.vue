@@ -4,6 +4,7 @@ import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import SplitHandle from '../components/SplitHandle.vue';
 import ToastNote from '../components/ToastNote.vue';
+import { savedValue, usePersistedState } from '../composables/usePersistedState';
 import AggregationTab from './AggregationTab.vue';
 import { createCollection, provideCollection, type Tab } from './collection';
 import DocumentsTab from './DocumentsTab.vue';
@@ -56,6 +57,63 @@ const showPipeline = ref(false);
 const DEFAULT_SHELL_HEIGHT = 200;
 const shellHeight = ref(DEFAULT_SHELL_HEIGHT);
 const maxShellHeight = () => Math.max(120, window.innerHeight - 220);
+
+/** Shell lines kept across reloads, newest first; longer lines are not kept. */
+const KEPT_HISTORY = 100;
+const KEPT_LINE = 2000;
+const TABS: readonly Tab[] = ['documents', 'aggregation', 'indexes', 'schema'];
+/** The collection a saved part belongs to; a part of another one is not restored. */
+const ns = () => (s.init ? `${s.init.database}.${s.init.collection}` : '');
+
+interface SavedCollection {
+  ns: string;
+  tab?: Tab;
+  shellOpen?: boolean;
+  shellHeight?: number;
+  history?: string[];
+}
+
+/** The open tab and the shell (open, height, the lines typed) come back after a reload; never its output. */
+const persisted = usePersistedState<SavedCollection>('mongo.collection', {
+  version: 1,
+  value: () =>
+    s.init
+      ? {
+          ns: ns(),
+          tab: s.tab,
+          shellOpen: s.shell.open,
+          shellHeight: shellHeight.value,
+          history: s.shell.history.filter((line) => line.length <= KEPT_LINE).slice(0, KEPT_HISTORY),
+        }
+      : undefined,
+  validate: (saved) => {
+    const o = savedValue.object(saved);
+    const name = savedValue.string(o?.ns);
+    if (!o || name === undefined) return undefined;
+    return {
+      ns: name,
+      tab: savedValue.oneOf(o.tab, TABS),
+      shellOpen: savedValue.boolean(o.shellOpen),
+      shellHeight: savedValue.number(o.shellHeight),
+      history: savedValue.strings(o.history, KEPT_HISTORY, KEPT_LINE),
+    };
+  },
+});
+
+// Restored once, when the collection is first shown; the tabs mount after this, on the saved tab.
+const stopRestore = watch(
+  () => s.init,
+  (init) => {
+    if (!init) return;
+    stopRestore();
+    const saved = persisted.restore();
+    if (!saved || saved.ns !== ns()) return;
+    if (saved.tab && !(saved.tab === 'indexes' && init.type === 'view')) s.tab = saved.tab;
+    if (saved.shellOpen !== undefined) s.shell.open = saved.shellOpen;
+    if (saved.shellHeight !== undefined) shellHeight.value = Math.max(80, Math.min(saved.shellHeight, maxShellHeight()));
+    if (saved.history) s.shell.history.splice(0, s.shell.history.length, ...saved.history);
+  },
+);
 
 function retry(): void {
   s.initError = null;
@@ -126,6 +184,7 @@ onUnmounted(col.stop);
       :running="s.shell.running"
       :database="s.shell.database"
       :collection="s.init.collection"
+      :history="s.shell.history"
       @run="col.runShell"
       @clear="s.shell.entries = []"
     />

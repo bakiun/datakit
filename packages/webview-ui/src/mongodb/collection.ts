@@ -58,8 +58,8 @@ export interface CollectionState {
   errors: Partial<Record<Load, string>>;
   explain: ExplainView | null;
   toast: Toast | null;
-  /** `running` is the line the shell runs now. */
-  shell: { entries: ShellEntry[]; busy: boolean; database: string; open: boolean; running: string };
+  /** `running` is the line the shell runs now; `history` the lines typed, newest first, for ↑ and ↓. */
+  shell: { entries: ShellEntry[]; busy: boolean; database: string; open: boolean; running: string; history: string[] };
   /** Asks the Indexes tab to open Create index with these keys, e.g. from Explain. */
   createIndex: { keys: string } | null;
   /**
@@ -90,7 +90,7 @@ export function createCollection() {
     errors: {},
     explain: null,
     toast: null,
-    shell: { entries: [], busy: false, database: '', open: false, running: '' },
+    shell: { entries: [], busy: false, database: '', open: false, running: '', history: [] },
     createIndex: null,
     documentsVersion: 0,
     indexesVersion: 0,

@@ -10,14 +10,15 @@ import ShellText from './ShellText.vue';
  * A mongosh-style prompt under the tabs: `<database>>`, ↑ and ↓ walk through earlier lines, answers print below
  * the line, errors in the error color. The bar folds it away; the page sizes it with a handle above it.
  */
-const props = defineProps<{ entries: ShellEntry[]; busy: boolean; running: string; database: string; collection: string }>();
+const props = defineProps<{ entries: ShellEntry[]; busy: boolean; running: string; database: string; collection: string; history: string[] }>();
 const open = defineModel<boolean>('open', { required: true });
 const emit = defineEmits<{ run: [line: string]; clear: [] }>();
 
 /** Longer answers are cut so the log stays small; Copy in the shell is the way to more. */
 const MAX_OUTPUT = 20_000;
+/** Lines ↑ walks back through; the page keeps them across reloads. */
+const MAX_HISTORY = 100;
 const line = ref('');
-const history: string[] = [];
 let back = -1;
 const log = ref<HTMLElement>();
 const input = ref<HTMLInputElement>();
@@ -33,18 +34,20 @@ watch(open, (isOpen) => {
 });
 
 function onKey(event: KeyboardEvent): void {
+  // The history is the collection's (newest first) and is changed in place, so the page keeps it across reloads.
   if (event.key === 'Enter' && line.value.trim() && !props.busy) {
-    if (history[0] !== line.value) history.unshift(line.value);
+    if (props.history[0] !== line.value) props.history.unshift(line.value);
+    if (props.history.length > MAX_HISTORY) props.history.splice(MAX_HISTORY);
     back = -1;
     emit('run', line.value);
     line.value = '';
-  } else if (event.key === 'ArrowUp' && history.length) {
-    back = Math.min(back + 1, history.length - 1);
-    line.value = history[back]!;
+  } else if (event.key === 'ArrowUp' && props.history.length) {
+    back = Math.min(back + 1, props.history.length - 1);
+    line.value = props.history[back]!;
     event.preventDefault();
   } else if (event.key === 'ArrowDown') {
     back = Math.max(back - 1, -1);
-    line.value = back < 0 ? '' : history[back]!;
+    line.value = back < 0 ? '' : props.history[back]!;
     event.preventDefault();
   }
 }

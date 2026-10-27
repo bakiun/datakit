@@ -105,15 +105,18 @@ function openData(services: Services, node: unknown): void {
  * connects first, so a password is asked once and the tree shows the connection. An open key browser is brought to
  * the front on the database it shows, without connecting.
  */
+/** Opens the key browser on the database the data source is set to; an open one comes to the front and goes back to it. */
 async function browseKeys(services: Services, dataSource: DataSource): Promise<void> {
-  if (dataSource.engine !== 'redis' || RedisKeysPanel.reveal(dataSource.id)) return;
-  try {
-    await connectWithProgress(services, dataSource.id);
-  } catch (error) {
-    showConnectionError(dataSource, error, 'datakit.openRedisKeys');
-    return;
+  if (dataSource.engine !== 'redis') return;
+  if (!RedisKeysPanel.isOpen(dataSource.id)) {
+    try {
+      await connectWithProgress(services, dataSource.id);
+    } catch (error) {
+      showConnectionError(dataSource, error, 'datakit.openRedisKeys');
+      return;
+    }
   }
-  RedisKeysPanel.show(services, dataSource.id);
+  RedisKeysPanel.show(services, dataSource.id, Number(dataSource.database) || 0);
 }
 
 export function registerDataSourceCommands(services: Services): vscode.Disposable[] {

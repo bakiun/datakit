@@ -12,10 +12,11 @@ import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import SplitHandle from '../components/SplitHandle.vue';
+import { keepText, savedValue, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import { useCollection } from './collection';
 import DocumentList from './DocumentList.vue';
-import DocumentPane from './DocumentPane.vue';
+import DocumentPane, { type PaneDraft } from './DocumentPane.vue';
 import DocumentsJson from './DocumentsJson.vue';
 import DocumentTable from './DocumentTable.vue';
 import { documentKey, errorField, lastPageIndex, num, oneLine, pageRange, pageSizeChoices, parseSkip, plural, startPageSize, type QueryField } from './format';
@@ -68,6 +69,9 @@ const pickedKey = ref<string | null>(null);
 const picked = shallowRef<MongoDocument | null>(null);
 const paneDirty = ref(false);
 const focusRequest = ref(0);
+/** The pane's unsaved edits, kept across reloads; `restoredPane` hands them back to the pane once. */
+const paneDraft = ref<PaneDraft | null>(null);
+const restoredPane = ref<PaneDraft | null>(null);
 
 type Dialog =
   | { kind: 'insert'; title: string; text: string }
@@ -170,6 +174,10 @@ function leavePane(then: () => void): void {
 }
 
 function show(d: MongoDocument | null, key: string | null): void {
+  if (key !== pickedKey.value) {
+    paneDraft.value = null;
+    restoredPane.value = null;
+  }
   picked.value = d;
   pickedKey.value = key;
 }
@@ -220,6 +228,7 @@ const stop = onHostMessage<MongoCollectionHostMessage>((message) => {
   if (message.type === 'pageFailed') {
     error.value = message.message;
     invalid.value = errorField(message.message);
+    restoredPick = null;
     return;
   }
   // A write emptied the last page: show the page that is now the last one.
@@ -233,12 +242,91 @@ const stop = onHostMessage<MongoCollectionHostMessage>((message) => {
   documents.value = message.page.documents;
   count.value = message.page.count;
   durationMs.value = message.durationMs;
+  if (restoredPick !== null) {
+    // The document open before the reload, if it is still on the page; otherwise the pane just stays closed.
+    const { key, draft } = restoredPick;
+    restoredPick = null;
+    const found = documents.value.find((d, i) => documentKey(d, i) === key);
+    if (found) {
+      show(found, key);
+      restoredPane.value = draft;
+    }
+    return;
+  }
   if (pickedKey.value === null) return;
   const fresh = documents.value.find((d, i) => documentKey(d, i) === pickedKey.value);
   if (fresh) picked.value = fresh;
   else if (!paneDirty.value) show(null, null);
 });
 onUnmounted(stop);
+
+/** Query bar fields, and the pane's draft, longer than these are not kept. */
+const KEPT_FIELD = 20_000;
+const KEPT_DRAFT = 100_000;
+const KEPT_KEY = 2000;
+const ns = `${s.init!.database}.${s.init!.collection}`;
+type SavedQuery = Omit<MongoFindQuery, 'limit'>;
+
+interface SavedDocuments {
+  ns: string;
+  draft: QueryDraft;
+  applied: SavedQuery;
+  pageIndex: number;
+  /** The document open in the pane, by its _id; documents without one are not kept. */
+  picked: string | null;
+  pane: PaneDraft | null;
+}
+
+const field = (value: unknown) => savedValue.string(value, KEPT_FIELD) ?? '';
+/**
+ * The query bar, the query of the page on show and its page, and the open document with its unsaved edits come back
+ * after a reload; the page is read again (find only reads). The documents themselves are never kept.
+ */
+const persisted = usePersistedState<SavedDocuments>('mongo.documents', {
+  version: 1,
+  value: () => {
+    const keep = (text: string) => keepText(text, KEPT_FIELD) ?? '';
+    const d = draft.value;
+    const a = applied.value;
+    const key = pickedKey.value;
+    const pane = paneDraft.value;
+    return {
+      ns,
+      draft: { filter: keep(d.filter), projection: keep(d.projection), sort: keep(d.sort), collation: keep(d.collation), skip: keep(d.skip) },
+      applied: { filter: keep(a.filter), projection: keep(a.projection), sort: keep(a.sort), collation: keep(a.collation), skip: a.skip },
+      pageIndex: pageIndex.value,
+      picked: key !== null && !key.startsWith('#') && key.length <= KEPT_KEY ? key : null,
+      pane: pane && keepText(pane.text, KEPT_DRAFT) !== undefined ? pane : null,
+    };
+  },
+  validate: (saved) => {
+    const o = savedValue.object(saved);
+    const name = savedValue.string(o?.ns);
+    if (!o || name === undefined) return undefined;
+    const d = savedValue.object(o.draft) ?? {};
+    const a = savedValue.object(o.applied) ?? {};
+    const p = savedValue.object(o.pane);
+    const base = savedValue.string(p?.base, 100);
+    const text = savedValue.string(p?.text, KEPT_DRAFT);
+    return {
+      ns: name,
+      draft: { filter: field(d.filter), projection: field(d.projection), sort: field(d.sort), collation: field(d.collation), skip: field(d.skip) },
+      applied: { filter: field(a.filter), projection: field(a.projection), sort: field(a.sort), collation: field(a.collation), skip: savedValue.integer(a.skip) ?? 0 },
+      pageIndex: savedValue.integer(o.pageIndex) ?? 0,
+      picked: savedValue.string(o.picked, KEPT_KEY) ?? null,
+      pane: base !== undefined && text !== undefined ? { base, text } : null,
+    };
+  },
+});
+/** The document to open again once the first page is read. */
+let restoredPick: { key: string; draft: PaneDraft | null } | null = null;
+const saved = persisted.restore();
+if (saved && saved.ns === ns) {
+  draft.value = saved.draft;
+  applied.value = { ...saved.applied, limit: pageSize.value };
+  pageIndex.value = saved.pageIndex;
+  if (saved.picked !== null) restoredPick = { key: saved.picked, draft: saved.pane };
+}
 
 fetchPage();
 </script>
@@ -334,9 +422,11 @@ fetchPage();
           :document="picked"
           :read-only-reason="col.readOnlyReason.value"
           :focus-request="focusRequest"
+          :initial-draft="restoredPane"
           @close="closePane"
           @deleted="show(null, null)"
           @dirty="paneDirty = $event"
+          @draft="paneDraft = $event"
         />
       </template>
     </div>

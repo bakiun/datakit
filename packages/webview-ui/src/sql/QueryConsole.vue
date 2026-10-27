@@ -9,12 +9,13 @@ import {
   type TableDataInit,
 } from '@datakit/core';
 import { format, type SqlLanguage } from 'sql-formatter';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import ResizeHandle from '../components/ResizeHandle.vue';
 import { SUBMIT_KEY } from '../components/shortcuts';
+import { savedValue, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import DataGrid from './DataGrid.vue';
 import ResultPanel from './ResultPanel.vue';
@@ -75,6 +76,23 @@ const databaseLocked = computed(() =>
   view.dialect === 'postgres' && view.transaction.open ? 'Commit or roll back the open transaction to change the database' : null,
 );
 const resultCount = computed(() => (view.page ? (view.total ?? view.rowCount).toLocaleString('en-US') : ''));
+
+/**
+ * The cursor or selection comes back after a reload of the page or the window. The script itself is kept in the
+ * console's file and the editor height in VS Code's state, so neither is kept here.
+ */
+const selection = ref<{ anchor: number; head: number } | null>(null);
+let restoredOnce = false;
+const persisted = usePersistedState<{ selection: { anchor: number; head: number } }>('queryConsole', {
+  version: 1,
+  value: () => (init.value && selection.value && (selection.value.anchor || selection.value.head) ? { selection: selection.value } : undefined),
+  validate: (saved) => {
+    const range = savedValue.object(savedValue.object(saved)?.selection);
+    const anchor = savedValue.integer(range?.anchor);
+    const head = savedValue.integer(range?.head);
+    return anchor !== undefined && head !== undefined ? { selection: { anchor, head } } : undefined;
+  },
+});
 
 /** The editor text is saved to the console's file; the text it opened with needs no save. */
 let saved = '';
@@ -174,6 +192,11 @@ const stop = onHostMessage<TableDataHostMessage>((message) => {
       schemas.value = message.init.console?.schemas ?? null;
       tables.value = message.init.tables;
       editorHeight.value = Math.max(MIN_EDITOR_HEIGHT, Math.min(message.init.editorHeight ?? DEFAULT_EDITOR_HEIGHT, maxEditorHeight()));
+      if (!restoredOnce) {
+        restoredOnce = true;
+        const range = persisted.restore()?.selection;
+        if (range) void nextTick(() => editor.value?.setSelection(range.anchor, range.head));
+      }
       break;
     case 'initFailed':
       initError.value = message.message;
@@ -286,7 +309,15 @@ onUnmounted(() => {
     </div>
 
     <section class="script" aria-label="SQL script" :style="{ height: `${editorHeight}px` }">
-      <ScriptEditor ref="editor" v-model="script" :dialect="view.dialect" :schema="completion" default-table="" @run="view.run()" />
+      <ScriptEditor
+        ref="editor"
+        v-model="script"
+        :dialect="view.dialect"
+        :schema="completion"
+        default-table=""
+        @run="view.run()"
+        @select="selection = $event"
+      />
     </section>
     <ResizeHandle
       v-model="editorHeight"

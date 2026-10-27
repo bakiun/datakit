@@ -4,6 +4,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import Icon from '../components/Icon.vue';
 import { SUBMIT_KEY } from '../components/shortcuts';
 import SplitHandle from '../components/SplitHandle.vue';
+import { keepText, savedValue, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import { useCollection } from './collection';
 import DocumentList from './DocumentList.vue';
@@ -102,6 +103,47 @@ watch(
     if (active && ran && version !== readVersion && !writesStage(ran.pipeline)) run(true);
   },
 );
+
+/** A longer pipeline is not kept across reloads. */
+const KEPT_PIPELINE = 100_000;
+const ns = `${s.init!.database}.${s.init!.collection}`;
+
+interface SavedAggregation {
+  ns: string;
+  pipeline?: string;
+  limit?: number;
+  mode?: Mode;
+  editorHeight?: number;
+}
+
+/**
+ * The pipeline, its limit, the result view and the editor height come back after a reload. The pipeline is not run
+ * again: it may hold $out or $merge, and its results are never kept.
+ */
+const persisted = usePersistedState<SavedAggregation>('mongo.aggregation', {
+  version: 1,
+  value: () => ({ ns, pipeline: keepText(pipeline.value, KEPT_PIPELINE), limit: limit.value, mode: mode.value, editorHeight: editorHeight.value }),
+  validate: (saved) => {
+    const o = savedValue.object(saved);
+    const name = savedValue.string(o?.ns);
+    if (!o || name === undefined) return undefined;
+    const kept = savedValue.integer(o.limit, 1);
+    return {
+      ns: name,
+      pipeline: savedValue.string(o.pipeline, KEPT_PIPELINE),
+      limit: kept !== undefined && limits.includes(kept) ? kept : undefined,
+      mode: savedValue.oneOf(o.mode, ['list', 'json'] as const),
+      editorHeight: savedValue.number(o.editorHeight),
+    };
+  },
+});
+const saved = persisted.restore();
+if (saved?.ns === ns) {
+  if (saved.pipeline !== undefined) pipeline.value = saved.pipeline;
+  if (saved.limit !== undefined) limit.value = saved.limit;
+  if (saved.mode) mode.value = saved.mode;
+  if (saved.editorHeight !== undefined) editorHeight.value = Math.max(80, Math.min(saved.editorHeight, maxEditorHeight()));
+}
 
 const stop = onHostMessage<MongoCollectionHostMessage>((message) => {
   if ((message.type !== 'page' && message.type !== 'pageFailed') || message.requestId !== current.value) return;

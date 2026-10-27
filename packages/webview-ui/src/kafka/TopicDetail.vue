@@ -1,11 +1,18 @@
+<script lang="ts">
+/** Only the first topic shown after the page loaded comes back with its tab; later ones open on Messages. */
+let firstMount = true;
+</script>
+
 <script setup lang="ts">
 import type { KafkaMessage, KafkaWorkspaceHostMessage } from '@datakit/core';
 import { computed, onUnmounted, ref } from 'vue';
 import Icon from '../components/Icon.vue';
+import { usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import { num, plural, prettyJson } from './format';
 import MessageBrowser from './MessageBrowser.vue';
 import ProduceForm, { type ProducePrefill } from './ProduceForm.vue';
+import { readSavedTopic } from './savedState';
 import StarButton from './StarButton.vue';
 import TopicConsumers from './TopicConsumers.vue';
 import TopicSettings from './TopicSettings.vue';
@@ -24,6 +31,18 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 const tab = ref<Tab>('messages');
 const produceOpen = ref(false);
+// The tab and the produce form come back after a reload of the page; the form holds its draft in the workspace.
+const saved = usePersistedState('kafka.topic', {
+  version: 1,
+  value: () => ({ topic: props.name, tab: tab.value, produceOpen: produceOpen.value }),
+  validate: readSavedTopic,
+});
+const restored = saved.restore();
+if (firstMount && restored?.topic === props.name) {
+  tab.value = restored.tab ?? 'messages';
+  produceOpen.value = restored.produceOpen ?? false;
+}
+firstMount = false;
 const prefill = ref<ProducePrefill | null>(null);
 /** The newest message on the page, which the produce form starts from. */
 const sample = ref<KafkaMessage | null>(null);

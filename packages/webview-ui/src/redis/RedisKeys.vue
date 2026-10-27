@@ -20,13 +20,14 @@ import {
 import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef } from 'vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
+import { keepText, savedStateStore, savedValue, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage, postToHost } from '../host';
 import { describeValue, keyId, textOf } from './format';
 import KeyHeader from './KeyHeader.vue';
 import KeyList from './KeyList.vue';
 import NewKeyForm from './NewKeyForm.vue';
 import RedisCli, { type CliEntry } from './RedisCli.vue';
-import StringValue from './StringValue.vue';
+import StringValue, { type StringDraft } from './StringValue.vue';
 import ValueDetail from './ValueDetail.vue';
 import ValueTable, { type CollectionType, type ValueRow } from './ValueTable.vue';
 
@@ -44,7 +45,8 @@ const command = ref('');
 const commandInvalid = ref(false);
 /** The SCAN behind the key list; “Load more” and refreshes repeat it. */
 const listScan = ref<ScanCommand>({ cursor: '0', match: '*', count: null, type: null });
-const commandHistory: string[] = [];
+/** Earlier top lines for ↑, newest first. */
+const commandHistory = ref<string[]>([]);
 let historyAt = -1;
 const keys = ref<RedisKeyInfo[]>([]);
 const cursor = ref('0');
@@ -79,6 +81,7 @@ const valueTable = useTemplateRef<Restorable>('valueTable');
 const keyHeader = useTemplateRef<Restorable>('keyHeader');
 
 const cli = ref<CliEntry[]>([]);
+const cliHistory = ref<string[]>([]);
 const cliBusy = ref(false);
 /** The last message under the command line; it stays until the next one. */
 const lastMessage = ref<{ text: string; error: boolean } | null>(null);
@@ -92,6 +95,100 @@ let quietScan = false;
 const post = (message: RedisKeysWebviewMessage) => postToHost(message);
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const sameKey = (a: RedisText | null, b: RedisText | null) => a !== null && b !== null && keyId(a) === keyId(b);
+
+/**
+ * What a reload of the page brings back, for the database it was saved on: the typed command and the lines typed
+ * before, the picked key and an unsaved string edit. Keys, values and CLI replies are read again instead.
+ */
+interface SavedKeys {
+  database: number;
+  command?: string;
+  commandHistory: string[];
+  cliHistory: string[];
+  selected?: RedisText;
+  rawView?: boolean;
+  stringDraft?: StringDraft;
+}
+const MAX_LINE = 4_000;
+const MAX_COMMAND_HISTORY = 50;
+const MAX_CLI_HISTORY = 100;
+const MAX_DRAFT = 100_000;
+const keyFits = (key: RedisText) => (typeof key === 'string' ? key.length : key.hex.length) <= MAX_LINE;
+const lines = (list: string[], max: number) => list.filter((l) => l.length <= MAX_LINE).slice(0, max);
+
+/** The unsaved edit of the open string value, and one kept from before a reload until its key is shown. */
+const stringDraft = ref<StringDraft | null>(null);
+const restoredStringDraft = ref<StringDraft | null>(null);
+/** The key picked before a reload, while it is opened again; if it is gone, the first key is shown quietly. */
+let restoringKey: RedisText | null = null;
+
+function readKey(value: unknown): RedisText | undefined {
+  const text = savedValue.string(value, MAX_LINE);
+  if (text !== undefined) return text;
+  const hex = savedValue.string(savedValue.object(value)?.hex, MAX_LINE);
+  return hex !== undefined && /^(?:[0-9a-f]{2})*$/i.test(hex) ? { hex } : undefined;
+}
+
+function readDraft(value: unknown): StringDraft | undefined {
+  const o = savedValue.object(value);
+  const key = readKey(o?.key);
+  const base = savedValue.string(o?.base, 100);
+  const view = savedValue.oneOf(o?.view, ['json', 'text'] as const);
+  const text = savedValue.string(o?.text, MAX_DRAFT);
+  return key !== undefined && base !== undefined && view !== undefined && text !== undefined ? { key, base, view, text } : undefined;
+}
+
+const persisted = usePersistedState<SavedKeys>('redis.keys', {
+  version: 1,
+  value: () => {
+    const d = stringDraft.value;
+    return {
+      database: database.value,
+      command: keepText(command.value, MAX_LINE),
+      commandHistory: lines(commandHistory.value, MAX_COMMAND_HISTORY),
+      cliHistory: lines(cliHistory.value, MAX_CLI_HISTORY),
+      selected: selected.value !== null && keyFits(selected.value) ? selected.value : undefined,
+      rawView: rawView.value,
+      stringDraft: d && keyFits(d.key) && d.text.length <= MAX_DRAFT ? d : undefined,
+    };
+  },
+  validate: (saved) => {
+    const o = savedValue.object(saved);
+    const db = savedValue.integer(o?.database);
+    if (!o || db === undefined) return undefined;
+    return {
+      database: db,
+      command: savedValue.string(o.command, MAX_LINE),
+      commandHistory: savedValue.strings(o.commandHistory, MAX_COMMAND_HISTORY, MAX_LINE) ?? [],
+      cliHistory: savedValue.strings(o.cliHistory, MAX_CLI_HISTORY, MAX_LINE) ?? [],
+      selected: readKey(o.selected),
+      rawView: savedValue.boolean(o.rawView),
+      stringDraft: readDraft(o.stringDraft),
+    };
+  },
+});
+let restored = false;
+
+/** Brings back what was kept, on the first start only and only for the database it was kept on; nothing is run. */
+function restoreSaved(initDatabase: number): void {
+  if (restored) return;
+  restored = true;
+  const saved = persisted.restore();
+  if (!saved || saved.database !== initDatabase) return;
+  if (saved.command !== undefined) command.value = saved.command;
+  commandHistory.value = saved.commandHistory;
+  cliHistory.value = saved.cliHistory;
+  if (saved.rawView !== undefined) rawView.value = saved.rawView;
+  if (saved.selected === undefined) return;
+  restoredStringDraft.value = saved.stringDraft && sameKey(saved.stringDraft.key, saved.selected) ? saved.stringDraft : null;
+  restoringKey = saved.selected;
+  pick(saved.selected);
+}
+
+function onStringDraft(draft: StringDraft | null): void {
+  stringDraft.value = draft;
+  restoredStringDraft.value = null;
+}
 
 const collection = computed((): CollectionType | null => {
   const type = page.value?.type;
@@ -163,7 +260,7 @@ function runCommand(): void {
     showAll();
     return;
   }
-  if (commandHistory[0] !== line) commandHistory.unshift(line);
+  if (commandHistory.value[0] !== line) commandHistory.value = [line, ...commandHistory.value].slice(0, MAX_COMMAND_HISTORY);
   historyAt = -1;
   const parsed = parseScanCommand(splitCommandLine(line));
   commandInvalid.value = false;
@@ -185,13 +282,13 @@ function runCommand(): void {
 
 function onCommandKey(event: KeyboardEvent): void {
   if (event.key === 'Enter') runCommand();
-  else if (event.key === 'ArrowUp' && commandHistory.length) {
-    historyAt = Math.min(historyAt + 1, commandHistory.length - 1);
-    command.value = commandHistory[historyAt]!;
+  else if (event.key === 'ArrowUp' && commandHistory.value.length) {
+    historyAt = Math.min(historyAt + 1, commandHistory.value.length - 1);
+    command.value = commandHistory.value[historyAt]!;
     event.preventDefault();
   } else if (event.key === 'ArrowDown' && historyAt >= 0) {
     historyAt--;
-    command.value = historyAt < 0 ? '' : commandHistory[historyAt]!;
+    command.value = historyAt < 0 ? '' : commandHistory.value[historyAt]!;
     event.preventDefault();
   }
 }
@@ -209,6 +306,8 @@ function pickType(event: Event): void {
 }
 
 function pick(key: RedisText): void {
+  if (!sameKey(key, restoringKey)) restoringKey = null;
+  if (restoredStringDraft.value && !sameKey(restoredStringDraft.value.key, key)) restoredStringDraft.value = null;
   selected.value = key;
   creating.value = false;
   loadingKey.value = true;
@@ -309,6 +408,7 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       listScan.value = { ...(message.init.lastScan ?? { match: '*', type: null, count: null }), cursor: '0' };
       listScan.value.count ??= message.init.scanCount;
       command.value = formatScanCommand(listScan.value);
+      restoreSaved(message.init.database);
       scan();
       break;
     case 'initFailed':
@@ -334,8 +434,10 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       break;
     case 'key': {
       if (!sameKey(message.detail.key, selected.value)) break;
+      if (sameKey(message.detail.key, restoringKey)) restoringKey = null;
       detail.value = message.detail;
       const p = message.page;
+      if (!message.append && p.type !== 'string') restoredStringDraft.value = null;
       if (!message.append) {
         page.value = p;
         rows.value = 'rows' in p ? (p.rows as ValueRow[]) : [];
@@ -353,17 +455,27 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
       }
       break;
     }
-    case 'keyGone':
+    case 'keyGone': {
       keys.value = keys.value.filter((k) => !sameKey(k.key, message.key));
-      if (sameKey(selected.value, message.key)) {
+      const wasSelected = sameKey(selected.value, message.key);
+      if (wasSelected) {
         selected.value = null;
         detail.value = null;
         page.value = null;
       }
       loadingKey.value = false;
-      showMessage('The key no longer exists.');
+      if (!sameKey(message.key, restoringKey)) {
+        showMessage('The key no longer exists.');
+        break;
+      }
+      // The key picked before a reload is gone: the browser shows the first key, as on a fresh start.
+      restoringKey = null;
+      restoredStringDraft.value = null;
+      if (wasSelected && !creating.value && keys.value[0]) pick(keys.value[0].key);
       break;
+    }
     case 'keyFailed':
+      restoringKey = null;
       loadingKey.value = false;
       keyError.value = message.message;
       break;
@@ -394,6 +506,10 @@ const stop = onHostMessage<RedisKeysHostMessage>((message) => {
     case 'database':
       database.value = message.database;
       databases.value = message.databases;
+      // The serializer opens the browser on the database shown now.
+      savedStateStore().updatePanel({ database: message.database });
+      restoringKey = null;
+      restoredStringDraft.value = null;
       selected.value = null;
       detail.value = null;
       page.value = null;
@@ -506,7 +622,9 @@ onUnmounted(stop);
             :read-only="readOnly"
             :keep-ttl="init.keepTtl"
             :busy="writing"
+            :initial-draft="restoredStringDraft"
             @edit="edit"
+            @draft="onStringDraft"
           />
           <template v-else-if="collection">
             <ValueTable
@@ -539,7 +657,7 @@ onUnmounted(stop);
       </main>
     </div>
 
-    <RedisCli :prompt="prompt" :entries="cli" :busy="cliBusy" @run="runCli" />
+    <RedisCli v-model:history="cliHistory" :prompt="prompt" :entries="cli" :busy="cliBusy" @run="runCli" />
   </div>
 </template>
 

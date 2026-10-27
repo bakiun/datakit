@@ -21,8 +21,10 @@ import type {
   SchemaSubject,
 } from '@datakit/core';
 import { inject, onUnmounted, provide, reactive, type InjectionKey } from 'vue';
+import { usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage, postToHost } from '../host';
 import type { MessageFilter } from './messageQuery';
+import { readSavedWorkspace, workspaceToSave } from './savedState';
 
 /**
  * State shared by the Kafka workspace screens: what the host sent for the cluster, which section is open, and the
@@ -165,9 +167,16 @@ export function createWorkspace() {
   const used = new Set<KafkaLoad>();
   /**
    * What a topic's screens held when they were left, by topic: the message filters and the produce form. Kept for
-   * as long as the workspace is open.
+   * as long as the workspace is open, and across a reload of the page with the section and the open topic.
    */
-  const memory = { filters: new Map<string, MessageFilter[]>(), produce: new Map<string, ProduceDraft>() };
+  const memory = reactive({ filters: new Map<string, MessageFilter[]>(), produce: new Map<string, ProduceDraft>() });
+  const saved = usePersistedState('kafka.workspace', {
+    version: 1,
+    value: () => workspaceToSave(state.section, state.topic, memory),
+    validate: readSavedWorkspace,
+  });
+  /** A topic opened from the saved state; if it is gone, the topic list shows without a word. */
+  let restoredTopic: string | null = null;
   let toastId = 0;
 
   /** Messages are copied so no Vue proxy goes to postMessage. */
@@ -287,8 +296,14 @@ export function createWorkspace() {
           if (state.topic) reopenTopic();
           break;
         }
-        state.section = message.init.section;
-        if (message.init.topic) openTopic(message.init.topic);
+        // The page's saved place is newer than the one the panel was opened with.
+        const restored = saved.restore();
+        for (const [name, filters] of Object.entries(restored?.filters ?? {})) memory.filters.set(name, filters);
+        for (const [name, draft] of Object.entries(restored?.produce ?? {})) memory.produce.set(name, draft);
+        state.section = restored?.section ?? message.init.section;
+        const topic = restored?.section ? (restored.section === 'topics' ? (restored.topic ?? null) : null) : message.init.topic;
+        restoredTopic = restored?.section && topic ? topic : null;
+        if (topic) openTopic(topic);
         else state.topic = null;
         break;
       }
@@ -315,6 +330,7 @@ export function createWorkspace() {
         state.formats = { ...state.formats, ...message.formats };
         break;
       case 'topic':
+        if (message.detail.name === restoredTopic) restoredTopic = null;
         if (message.detail.name !== state.topic) break;
         state.loading.topic = false;
         state.topicDetail = message.detail;
@@ -324,7 +340,8 @@ export function createWorkspace() {
         break;
       case 'topicGone':
         state.loading.topic = false;
-        if (state.topic === message.topic) showToast(`Topic ${message.topic} no longer exists; showing the topic list.`);
+        if (state.topic === message.topic && restoredTopic !== message.topic) showToast(`Topic ${message.topic} no longer exists; showing the topic list.`);
+        if (restoredTopic === message.topic) restoredTopic = null;
         forgetTopic(message.topic);
         break;
       case 'groups':

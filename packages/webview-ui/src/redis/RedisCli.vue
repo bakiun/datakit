@@ -10,15 +10,19 @@ export interface CliEntry {
   durationMs: number | null;
 }
 
+/** Earlier lines kept for ↑, newest first. */
+const MAX_HISTORY = 100;
+
 /**
  * A redis-cli style prompt under the browser; ↑ and ↓ walk through earlier lines and back to what was being typed.
  * The prompt keeps the focus while a command runs, so the next one can be typed; Enter waits for the reply.
+ * `history` belongs to the page, which keeps it across reloads.
  */
 const props = defineProps<{ prompt: string; entries: CliEntry[]; busy: boolean }>();
 const emit = defineEmits<{ run: [line: string] }>();
+const history = defineModel<string[]>('history', { required: true });
 
 const line = ref('');
-const history: string[] = [];
 let back = -1;
 /** What was typed before ↑ was pressed. */
 let typed = '';
@@ -31,18 +35,18 @@ watch(
 
 function onKey(event: KeyboardEvent): void {
   if (event.key === 'Enter' && line.value.trim() && !props.busy) {
-    if (history[0] !== line.value) history.unshift(line.value);
+    if (history.value[0] !== line.value) history.value = [line.value, ...history.value].slice(0, MAX_HISTORY);
     back = -1;
     emit('run', line.value);
     line.value = '';
-  } else if (event.key === 'ArrowUp' && history.length) {
+  } else if (event.key === 'ArrowUp' && history.value.length) {
     if (back < 0) typed = line.value;
-    back = Math.min(back + 1, history.length - 1);
-    line.value = history[back]!;
+    back = Math.min(back + 1, history.value.length - 1);
+    line.value = history.value[back]!;
     event.preventDefault();
   } else if (event.key === 'ArrowDown' && back >= 0) {
     back--;
-    line.value = back < 0 ? typed : history[back]!;
+    line.value = back < 0 ? typed : history.value[back]!;
     event.preventDefault();
   }
 }

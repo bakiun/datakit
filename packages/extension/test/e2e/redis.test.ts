@@ -209,11 +209,28 @@ suite('Redis key browser', () => {
     assert.equal(started.dataSourceName, 'sessions');
     assert.equal(started.database, 3);
 
+    // After switching the open key browser to another database, running it again goes back to the one it is set to.
+    await api.sendToRedis(other, { type: 'select', database: 1 });
+    const back = new Promise<Reply<'database'>>((resolve) => {
+      const listener = api.onDidPostRedis(({ dataSourceId, message }) => {
+        if (dataSourceId !== other || message.type !== 'database') return;
+        listener.dispose();
+        resolve(message);
+      });
+    });
+    await vscode.commands.executeCommand('datakit.openRedisKeys', node);
+    assert.equal((await back).database, 3);
+
     // Run again, it brings the open key browser to the front instead of opening another, and does not connect.
     await api.sessions.disconnect(other);
     await vscode.commands.executeCommand('datakit.openRedisKeys', node);
     assert.equal(api.sessions.status(other), 'idle');
-    const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.label === 'sessions · db3');
-    assert.equal(tabs.length, 1);
+    // The tab list learns of a new title a moment after the panel gets it.
+    const tabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.label.startsWith('sessions · '));
+    for (let i = 0; i < 20 && tabs()[0]?.label !== 'sessions · db3'; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(
+      tabs().map((t) => t.label),
+      ['sessions · db3'],
+    );
   });
 });

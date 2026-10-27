@@ -29,7 +29,6 @@ Work that has not been done yet but needs to be done. Finished items are removed
 - [ ] Suggestion row in the Execution Plan (e.g. "full table scan … index suggestion").
 - [ ] MySQL: server warnings (`SHOW WARNINGS`) in the Messages tab.
 - [ ] Fix suggestion on the error line (e.g. "Replace with o.total").
-- [ ] Restore the open console and data tabs when VS Code is reopened (`WebviewPanelSerializer`).
 - [ ] PostgreSQL: visual plan with `EXPLAIN (FORMAT JSON)`.
 - [ ] PostgreSQL: `COPY … FROM STDIN` / `TO STDOUT` support.
 - [ ] PostgreSQL: show `LISTEN`/`NOTIFY` notifications.

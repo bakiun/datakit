@@ -33,8 +33,17 @@ const props = defineProps<{
   openTransaction: number | null;
   /** Why the open transaction cannot be ended from here now; null when it can. */
   endBlocked: string | null;
+  /** The draft to start with instead of the table as it is, e.g. the one kept over a reload; it must fit `structure`. */
+  initialDraft?: StructureDraft | null;
 }>();
-const emit = defineEmits<{ apply: [statements: string[]]; viewDdl: []; copy: [sql: string]; endTransaction: [type: 'commit' | 'rollback'] }>();
+/** `draft`: the unapplied edits whenever they change, null when there are none. */
+const emit = defineEmits<{
+  apply: [statements: string[]];
+  viewDdl: [];
+  copy: [sql: string];
+  endTransaction: [type: 'commit' | 'rollback'];
+  draft: [draft: StructureDraft | null];
+}>();
 
 const MYSQL_COLUMN_TYPES = [
   'int',
@@ -90,10 +99,11 @@ const columnTypes = computed(() => (postgres.value ? POSTGRES_COLUMN_TYPES : MYS
 const kinds = computed(() => indexKinds(props.structure.dialect));
 const actions = computed(() => referentialActions(props.structure.dialect));
 
-const draft = ref<StructureDraft>(draftOf(props.structure));
+const draft = ref<StructureDraft>(props.initialDraft ? (JSON.parse(JSON.stringify(props.initialDraft)) as StructureDraft) : draftOf(props.structure));
 const original = computed(() => draftOf(props.structure));
 const root = ref<HTMLElement>();
-let added = 0;
+/** Numbers the names of added rows; a restored draft's new rows are counted, so names do not repeat. */
+let added = [...draft.value.columns, ...draft.value.indexes, ...draft.value.foreignKeys].filter((r) => r.original === null).length;
 
 // A new structure (after Apply) starts a fresh draft.
 watch(
@@ -105,6 +115,11 @@ const editable = computed(() => props.readOnlyReason === null);
 const errors = computed(() => validateDraft(props.structure, draft.value));
 const firstError = computed(() => Object.values(errors.value)[0] ?? null);
 const changes = computed(() => countDraftChanges(props.structure, draft.value));
+watch(
+  draft,
+  (value) => emit('draft', changes.value ? value : null),
+  { deep: true, immediate: true },
+);
 const statements = computed(() => (firstError.value ? [] : buildAlterTable(props.structure, draft.value)));
 /** DDL commits an open transaction on MySQL; on PostgreSQL the change set needs a transaction of its own. */
 const transactionNote = computed(() => {

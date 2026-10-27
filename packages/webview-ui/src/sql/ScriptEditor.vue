@@ -17,7 +17,8 @@ import { GRAMMARS } from './scriptClauses';
  */
 const props = defineProps<{ dialect: SqlDialect; schema: Record<string, string[]>; defaultTable: string }>();
 const model = defineModel<string>({ required: true });
-const emit = defineEmits<{ run: [] }>();
+/** `select`: the cursor or selection moved, as anchor and head; the views keep it to come back after a reload. */
+const emit = defineEmits<{ run: []; select: [range: { anchor: number; head: number }] }>();
 
 const host = ref<HTMLElement>();
 let view: EditorView | undefined;
@@ -59,6 +60,10 @@ onMounted(() => {
           indentWithTab,
         ]),
         EditorView.updateListener.of((update) => {
+          if (update.selectionSet) {
+            const { anchor, head } = update.state.selection.main;
+            emit('select', { anchor, head });
+          }
           if (!update.docChanged) return;
           model.value = update.state.doc.toString();
           sinceMark = sinceMark?.compose(update.changes);
@@ -103,6 +108,12 @@ defineExpose({
   /** Where the cursor is. */
   cursor(): number {
     return view?.state.selection.main.head ?? 0;
+  },
+  /** Selects from `anchor` to `head` (the cursor when equal) without taking the focus, e.g. after a reload. */
+  setSelection(anchor: number, head: number): void {
+    if (!view) return;
+    const length = view.state.doc.length;
+    view.dispatch({ selection: EditorSelection.single(Math.min(anchor, length), Math.min(head, length)), scrollIntoView: true });
   },
   /** Puts the cursor at `position`, scrolls there and focuses the editor. */
   focusAt(position: number): void {

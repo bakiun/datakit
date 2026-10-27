@@ -1,17 +1,40 @@
+<script lang="ts">
+import type { RedisText } from '@datakit/core';
+
+/** Unsaved edits of a string value; `base` fingerprints the value they started from. */
+export interface StringDraft {
+  key: RedisText;
+  base: string;
+  view: 'json' | 'text';
+  text: string;
+}
+</script>
+
 <script setup lang="ts">
-import type { RedisEdit, RedisKeyDetail, RedisText } from '@datakit/core';
-import { computed, ref, watch } from 'vue';
+import type { RedisEdit, RedisKeyDetail } from '@datakit/core';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import CodeView from '../components/CodeView.vue';
 import { isModShortcut, isSubmitShortcut, modShortcutLabel } from '../components/shortcuts';
-import { describeValue, isBinary, textOf } from './format';
+import { fingerprint } from '../composables/usePersistedState';
+import { describeValue, isBinary, keyId, textOf } from './format';
 
 /**
  * A string value in an editor. JSON is shown indented and saved back compact when the stored value was compact;
  * `raw`, shared with the item detail, shows it as stored. Switching the view keeps what was typed. ⌘S or ⌘Enter
  * (Ctrl+S or Ctrl+Enter off macOS) saves. Binary values and values cut short (over 1 MiB) are shown read-only.
+ * `initialDraft` brings back edits kept from before a reload, when they are for this key and its value is unchanged;
+ * `draft` tells the page the unsaved edits, null when there are none.
  */
-const props = defineProps<{ detail: RedisKeyDetail; value: RedisText; truncated: boolean; readOnly: boolean; keepTtl: boolean; busy: boolean }>();
-const emit = defineEmits<{ edit: [edit: RedisEdit] }>();
+const props = defineProps<{
+  detail: RedisKeyDetail;
+  value: RedisText;
+  truncated: boolean;
+  readOnly: boolean;
+  keepTtl: boolean;
+  busy: boolean;
+  initialDraft?: StringDraft | null;
+}>();
+const emit = defineEmits<{ edit: [edit: RedisEdit]; draft: [draft: StringDraft | null] }>();
 const raw = defineModel<boolean>('raw', { required: true });
 
 const original = computed(() => textOf(props.value));
@@ -45,6 +68,19 @@ watch(view, (shown, before) => {
   }
 });
 watch(draft, () => (error.value = null));
+
+/** Worked out once per value, not on every keystroke. */
+const base = computed(() => fingerprint(original.value));
+const start = props.initialDraft;
+if (start && !locked.value && keyId(start.key) === keyId(props.detail.key) && start.view === view.value && start.base === base.value) {
+  draft.value = start.text;
+}
+watch(
+  [draft, clean, locked, view, () => props.detail.key],
+  () => emit('draft', clean.value || locked.value ? null : { key: props.detail.key, base: base.value, view: view.value, text: draft.value }),
+  { immediate: true },
+);
+onBeforeUnmount(() => emit('draft', null));
 
 /** Writes the draft; in the JSON view it must parse, unless `asText` saves it exactly as typed. */
 function save(asText = false): void {

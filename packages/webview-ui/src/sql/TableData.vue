@@ -1,11 +1,22 @@
 <script setup lang="ts">
-import type { TableDataHostMessage, TableDataInit } from '@datakit/core';
+import {
+  changesData,
+  draftOf,
+  isPageableQuery,
+  splitSqlScript,
+  type SqlDialect,
+  type StructureDraft,
+  type TableDataHostMessage,
+  type TableDataInit,
+  type TableStructure,
+} from '@datakit/core';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import ConfirmDialog from '../components/ConfirmDialog.vue';
 import Icon from '../components/Icon.vue';
 import IconButton from '../components/IconButton.vue';
 import ResizeHandle from '../components/ResizeHandle.vue';
 import { SUBMIT_KEY } from '../components/shortcuts';
+import { fingerprint, keepText, savedValue, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage } from '../host';
 import ResultPanel from './ResultPanel.vue';
 import ScriptEditor from './ScriptEditor.vue';
@@ -36,6 +47,89 @@ const completion = computed(() => {
   return s ? { [s.table]: s.columns.map((c) => c.name) } : {};
 });
 
+/**
+ * What comes back after a reload of the page or the window: the script as edited, the cursor, the tab and the
+ * Structure tab's unapplied draft. Grid edits are not kept: the rows are read again and may have changed.
+ */
+interface SavedView {
+  /** The table the state belongs to. */
+  table: string;
+  /** Only when it differs from the script the view opens with. */
+  script?: string;
+  selection?: { anchor: number; head: number };
+  mode: 'data' | 'structure';
+  /** `base` fingerprints the table the draft was made on; a table changed since does not take it. */
+  structure?: { base: string; draft: StructureDraft };
+}
+const MAX_SCRIPT = 100_000;
+const tableKey = (s: TableStructure) => [s.database, s.schema ?? '', s.table].join('\n');
+const selection = ref<{ anchor: number; head: number } | null>(null);
+/** The Structure tab's draft while it has changes, and the one it starts with after a reload. */
+const structureDraft = ref<StructureDraft | null>(null);
+const restoredDraft = ref<StructureDraft | null>(null);
+const structureBase = computed(() => (structure.value ? fingerprint(draftOf(structure.value)) : ''));
+let restoredOnce = false;
+
+const persisted = usePersistedState<SavedView>('tableData', {
+  version: 1,
+  value: () => {
+    const s = structure.value;
+    if (!init.value || !s) return undefined;
+    const edited = script.value !== init.value.script ? keepText(script.value, MAX_SCRIPT) : undefined;
+    return {
+      table: tableKey(s),
+      ...(edited !== undefined ? { script: edited } : {}),
+      ...(selection.value && (selection.value.anchor || selection.value.head) ? { selection: selection.value } : {}),
+      mode: mode.value,
+      ...(structureDraft.value ? { structure: { base: structureBase.value, draft: structureDraft.value } } : {}),
+    };
+  },
+  validate: (saved) => {
+    const o = savedValue.object(saved);
+    const table = savedValue.string(o?.table);
+    if (!o || table === undefined) return undefined;
+    const range = savedValue.object(o.selection);
+    const anchor = savedValue.integer(range?.anchor);
+    const head = savedValue.integer(range?.head);
+    const draft = savedValue.object(o.structure);
+    const base = savedValue.string(draft?.base);
+    const value = savedValue.object(draft?.draft);
+    const lists = value && ['columns', 'indexes', 'foreignKeys', 'checks'].every((k) => Array.isArray(value[k]));
+    return {
+      table,
+      script: savedValue.string(o.script, MAX_SCRIPT),
+      selection: anchor !== undefined && head !== undefined ? { anchor, head } : undefined,
+      mode: savedValue.oneOf(o.mode, ['data', 'structure'] as const) ?? 'data',
+      structure: base !== undefined && lists ? { base, draft: value as unknown as StructureDraft } : undefined,
+    };
+  },
+});
+
+/** Whether a restored script may run by itself: only queries that read, never one that writes. */
+function onlyReads(text: string, dialect: SqlDialect): boolean {
+  const parts = splitSqlScript(text, dialect);
+  return parts.length > 0 && parts.every((p) => isPageableQuery(p.text, dialect) && !changesData(p.text, dialect));
+}
+
+/** Starts the view with a new init, and on the first one with what was kept before the reload, if it is this table's. */
+function start(value: TableDataInit): void {
+  const saved = restoredOnce ? undefined : persisted.restore();
+  restoredOnce = true;
+  const fits = saved && value.structure && saved.table === tableKey(value.structure) ? saved : undefined;
+  script.value = fits?.script ?? value.script;
+  if (fits) {
+    mode.value = fits.mode;
+    restoredDraft.value = fits.structure && value.structure && fits.structure.base === fingerprint(draftOf(value.structure)) ? fits.structure.draft : null;
+  }
+  void nextTick(() => {
+    // The query the view opens with is not something the user ran, so it stays out of the history. A restored script
+    // runs the same way only when all it does is read.
+    if (!fits?.script || onlyReads(script.value, value.dialect)) view.run({ record: false });
+    else view.showNotice('The script was restored but not run, as it changes data.');
+    if (fits?.selection) editor.value?.setSelection(fits.selection.anchor, fits.selection.head);
+  });
+}
+
 const structureReadOnly = computed(() => {
   if (init.value?.readOnly) return 'The data source is read-only.';
   if (structure.value?.kind === 'materializedView') return 'Materialized views are changed by dropping and creating them again in the script.';
@@ -64,10 +158,8 @@ const stop = onHostMessage<TableDataHostMessage>((message) => {
     case 'init':
       init.value = message.init;
       view.start(message.init);
-      script.value = message.init.script;
       editorHeight.value = Math.max(MIN_EDITOR_HEIGHT, Math.min(message.init.editorHeight ?? DEFAULT_EDITOR_HEIGHT, maxEditorHeight()));
-      // The query the view opens with is not something the user ran, so it stays out of the history.
-      void nextTick(() => view.run({ record: false }));
+      start(message.init);
       break;
     case 'initFailed':
       initError.value = message.message;
@@ -130,7 +222,15 @@ onUnmounted(() => {
     </div>
 
     <section v-show="mode === 'data'" class="script" aria-label="SQL script" :style="{ height: `${editorHeight}px` }">
-      <ScriptEditor ref="editor" v-model="script" :dialect="view.dialect" :schema="completion" :default-table="structure.table" @run="view.run()" />
+      <ScriptEditor
+        ref="editor"
+        v-model="script"
+        :dialect="view.dialect"
+        :schema="completion"
+        :default-table="structure.table"
+        @run="view.run()"
+        @select="selection = $event"
+      />
     </section>
     <ResizeHandle
       v-show="mode === 'data'"
@@ -154,6 +254,8 @@ onUnmounted(() => {
       :error="alterError"
       :open-transaction="view.transaction.open ? view.transaction.changes : null"
       :end-blocked="endBlocked"
+      :initial-draft="restoredDraft"
+      @draft="structureDraft = $event"
       @apply="applyStructure"
       @copy="view.post({ type: 'copySql', sql: $event })"
       @view-ddl="view.post({ type: 'viewDdl' })"

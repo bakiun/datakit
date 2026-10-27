@@ -23,9 +23,11 @@ import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref } fr
 import FormRow from '../components/FormRow.vue';
 import Icon from '../components/Icon.vue';
 import { isSubmitShortcut, SUBMIT_KEY } from '../components/shortcuts';
+import { fingerprint, savedStateStore, usePersistedState } from '../composables/usePersistedState';
 import { onHostMessage, postToHost } from '../host';
 import AdvancedSection from './AdvancedSection.vue';
 import { assignSettings, formKey } from './form';
+import { formToSave, readSavedForm } from './formState';
 import GeneralSection from './GeneralSection.vue';
 import KafkaGeneralSection from './KafkaGeneralSection.vue';
 import MongoGeneralSection from './MongoGeneralSection.vue';
@@ -55,6 +57,17 @@ const section = ref<FormSection>('general');
 const showErrors = ref(false);
 const busy = ref<'test' | 'save' | null>(null);
 const status = ref<{ ok: boolean; message: string } | null>(null);
+/** The data source the form edits, and a fingerprint of the settings it was loaded with; null for a new one. */
+const dataSourceId = ref<string | null>(null);
+const base = ref<string | null>(null);
+
+/** The form comes back after a reload of the page or the window: its fields and tab, never a password. */
+const persisted = usePersistedState('dataSourceEditor', {
+  version: 1,
+  value: () =>
+    loaded.value ? formToSave({ mode: mode.value, dataSourceId: dataSourceId.value, base: base.value, settings, section: section.value }) : undefined,
+  validate: readSavedForm,
+});
 
 const nameInput = ref<HTMLInputElement | null>(null);
 /** The name used when Name is left empty; the field shows it as its placeholder. */
@@ -93,6 +106,8 @@ function setFilePath(field: FileField, path: string): void {
 function load(state: EditorState): void {
   assignSettings(settings, state.settings);
   mode.value = state.mode;
+  dataSourceId.value = state.id;
+  base.value = state.mode === 'edit' ? fingerprint(state.settings) : null;
   storedSecrets.value = state.storedSecrets;
   otherNames.value = state.otherNames;
   for (const key of SECRET_KEYS) {
@@ -101,6 +116,18 @@ function load(state: EditorState): void {
   }
   showErrors.value = false;
   loaded.value = true;
+}
+
+/**
+ * After a reload: the tab, and the fields as they were typed, when the draft belongs to this form. An edited data
+ * source that was saved since (e.g. in another window) keeps what was saved; the draft is dropped.
+ */
+function restoreDraft(state: EditorState): void {
+  const saved = persisted.restore();
+  if (!saved || saved.mode !== state.mode || saved.dataSourceId !== state.id) return;
+  section.value = saved.section;
+  if (state.mode === 'edit' && (saved.base !== base.value || saved.settings.engine !== state.settings.engine)) return;
+  assignSettings(settings, saved.settings);
 }
 
 /** Secrets to send: all relevant ones for a new data source, only retyped ones when editing. */
@@ -182,6 +209,7 @@ const stop = onHostMessage<EditorHostMessage>((message) => {
   switch (message.type) {
     case 'init':
       load(message.state);
+      restoreDraft(message.state);
       void nextTick(() => nameInput.value?.focus());
       break;
     case 'testResult':
@@ -190,6 +218,8 @@ const stop = onHostMessage<EditorHostMessage>((message) => {
       break;
     case 'saved':
       load(message.state);
+      // A new data source is now this one; after a restart the tab edits it.
+      savedStateStore().updatePanel({ dataSourceId: message.state.id });
       busy.value = null;
       status.value = { ok: true, message: 'Saved.' };
       break;

@@ -123,11 +123,9 @@ export class RedisKeysPanel {
     if (database !== undefined && database !== existing.database) void existing.select(database);
   }
 
-  /** Brings the data source's key browser to the front, on the database it shows; tells whether one is open. */
-  static reveal(dataSourceId: string): boolean {
-    const existing = RedisKeysPanel.panels.get(dataSourceId);
-    existing?.panel.reveal();
-    return existing !== undefined;
+  /** Whether the data source has a key browser open. */
+  static isOpen(dataSourceId: string): boolean {
+    return RedisKeysPanel.panels.has(dataSourceId);
   }
 
   /**
